@@ -40,17 +40,26 @@ if [[ -n $period ]]; then
   base_sdc=$(make -s -C "$FLOW_HOME" DESIGN_CONFIG="$config" print-SDC_FILE | sed 's/^SDC_FILE: //')
   sdc="$WORK_HOME/sdc/${design}_${period}.sdc"
   mkdir -p "$(dirname "$sdc")"
-  sed -E "s/^(set[[:space:]]+clk_period[[:space:]]+)[0-9.]+/\1$period/" "$base_sdc" > "$sdc"
-  if ! grep -qE "^set[[:space:]]+clk_period[[:space:]]+$period\b" "$sdc"; then
-    echo "failed to set clk_period in $sdc (from $base_sdc)" >&2
+  sed -E "s/^(set[[:space:]]+clk_period[[:space:]]+)[0-9.]+/\1$period/" "$base_sdc" > "$sdc.tmp"
+  if ! grep -qE "^set[[:space:]]+clk_period[[:space:]]+$period\b" "$sdc.tmp"; then
+    echo "failed to set clk_period in $sdc.tmp (from $base_sdc)" >&2
     exit 1
+  fi
+  # Replace only on change: the SDC is a make prerequisite of synthesis, so a
+  # fresh mtime would rerun the whole flow.
+  if cmp -s "$sdc.tmp" "$sdc"; then
+    rm "$sdc.tmp"
+  else
+    mv "$sdc.tmp" "$sdc"
   fi
   make_args+=(FLOW_VARIANT="p$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
 fi
 make_args+=("$@")
 
 results=$(orfs_make -s print-RESULTS_DIR | sed 's/^RESULTS_DIR: //')
+logs=$(orfs_make -s print-LOG_DIR | sed 's/^LOG_DIR: //')
 
 echo "[run_flow] $design ${period:+@ ${period}ps }-> $results"
-orfs_make finish
+# The final report writes 6_final.{odb,v,spef}; GDS (KLayout) isn't needed.
+orfs_make "$logs/6_report.log" "$results/6_final.sdc"
 echo "[run_flow] done: $results/6_final.odb, $results/6_final.spef"

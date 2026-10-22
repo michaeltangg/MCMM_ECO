@@ -46,6 +46,7 @@ scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibe
 
 - Stock ORFS timing repair runs in every stage. Tight clocks leave residual violations.
 - Outputs land in `work/results/asap7/<design>/<variant>/`: `6_final.{odb,v,sdc,spef}`.
+- The flow stops after the final report (which runs OpenRCX and writes the SPEF). GDS merge is skipped, so KLayout isn't needed. [flow/load_hook.tcl](flow/load_hook.tcl) stubs `gui::show`, which the prebuilt OpenROAD lacks in batch mode.
 - With `period_ps`, the design's SDC is copied with `clk_period` rewritten, and results go to the `p<period_ps>` variant. Without it, the variant is `base`.
 
 Inspect a finished design under all corners:
