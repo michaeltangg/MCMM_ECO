@@ -18,8 +18,10 @@ export CORNER = WC
 export ASAP7_USE_VT ?= RVT LVT SLVT
 
 # SLVT stays out of every stage up to the checkpoint (applied in load_hook.tcl).
-# Pass RESERVE_SLVT=0 when loading the checkpoint for post-CTS repair.
+# RESERVE_LVT=1 also keeps LVT out (RVT-only before CTS).
+# Pass RESERVE_SLVT=0 RESERVE_LVT=0 when loading the checkpoint for post-CTS repair.
 export RESERVE_SLVT ?= 1
+export RESERVE_LVT  ?= 0
 export LAYER_PARASITICS_FILE = $(PROJECT_ROOT)/flow/load_hook.tcl
 
 # 4_cts.odb is the experiment checkpoint: post-CTS, setup and hold unrepaired.

@@ -5,7 +5,8 @@
 #
 # Without period_ps the design's own SDC is used (FLOW_VARIANT=base).
 # With period_ps a copy of that SDC with `set clk_period` rewritten is used
-# (FLOW_VARIANT=p<period_ps>), so each clock target gets its own results tree.
+# (FLOW_VARIANT=<VARIANT_PREFIX><period_ps>, prefix default "p"), so each clock
+# target gets its own results tree.
 #
 # Synthesis is split from the rest of the flow: yosys runs with RVT only so
 # ABC doesn't map everything to SLVT, then 1_synth.odb (where LEFs are read)
@@ -49,7 +50,7 @@ if [[ -n $period ]]; then
     echo "failed to set clk_period in $sdc (from $base_sdc)" >&2
     exit 1
   fi
-  make_args+=(FLOW_VARIANT="p$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
+  make_args+=(FLOW_VARIANT="${VARIANT_PREFIX:-p}$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
 fi
 make_args+=("$@")
 

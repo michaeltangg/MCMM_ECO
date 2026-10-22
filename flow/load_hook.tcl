@@ -4,7 +4,10 @@
 
 source $::env(PLATFORM_DIR)/setRC.tcl
 
-# Reserve SLVT for post-CTS repair: pre-CTS optimization may only use RVT/LVT.
+# Reserve SLVT (and optionally LVT) for post-CTS repair.
 if { [env_var_equals RESERVE_SLVT 1] } {
   set_dont_use [get_lib_cells */*_ASAP7_75t_SL]
+}
+if { [env_var_equals RESERVE_LVT 1] } {
+  set_dont_use [get_lib_cells */*_ASAP7_75t_L]
 }
