@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Run ORFS on ASAP7 through CTS with MCMM corners and RVT/LVT/SLVT.
+# Run ORFS on ASAP7 through finish (post-route, extracted SPEF) with MCMM corners.
 #
 #   scripts/run_flow.sh <design> [period_ps] [extra make args...]
 #
 # Without period_ps the design's own SDC is used (FLOW_VARIANT=base).
 # With period_ps a copy of that SDC with `set clk_period` rewritten is used
-# (FLOW_VARIANT=<VARIANT_PREFIX><period_ps>, prefix default "p"), so each clock
-# target gets its own results tree.
-#
-# Synthesis is split from the rest of the flow: yosys runs with RVT only so
-# ABC doesn't map everything to SLVT, then 1_synth.odb (where LEFs are read)
-# and later stages run with all three Vt flavors.
+# (FLOW_VARIANT=p<period_ps>), so each clock target gets its own results tree.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -50,13 +45,12 @@ if [[ -n $period ]]; then
     echo "failed to set clk_period in $sdc (from $base_sdc)" >&2
     exit 1
   fi
-  make_args+=(FLOW_VARIANT="${VARIANT_PREFIX:-p}$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
+  make_args+=(FLOW_VARIANT="p$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
 fi
 make_args+=("$@")
 
 results=$(orfs_make -s print-RESULTS_DIR | sed 's/^RESULTS_DIR: //')
 
 echo "[run_flow] $design ${period:+@ ${period}ps }-> $results"
-orfs_make ASAP7_USE_VT=RVT "$results/1_2_yosys.v"
-orfs_make cts
-echo "[run_flow] done: $results/4_cts.odb"
+orfs_make finish
+echo "[run_flow] done: $results/6_final.odb, $results/6_final.spef"

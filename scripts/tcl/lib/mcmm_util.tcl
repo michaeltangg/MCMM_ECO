@@ -1,8 +1,13 @@
-# Shared helpers for MCMM checkpoint scripts (check_mcmm.tcl, gate1.tcl).
+# Shared helpers for MCMM STA scripts.
 # Slack values are reported in ps; sta:: functions return seconds.
 
 proc ps { seconds } {
   return [format %.3f [expr { $seconds * 1e12 }]]
+}
+
+# ODB escapes brackets in names, STA doesn't; compare with backslashes removed.
+proc norm { name } {
+  return [string map {\\ {}} $name]
 }
 
 # sta::endpoint_violation_count ignores the scene, so count from report_checks.
@@ -28,11 +33,11 @@ proc scene_metrics { scene } {
     hold_viol [violator_count $scene min]]
 }
 
-proc vt_of { master } {
-  if { [regexp {_ASAP7_75t_(R|L|SL)$} $master -> vt] } {
-    return $vt
-  }
-  return other
+# Wall-clock seconds to run script in the caller's scope.
+proc timed { script } {
+  set start [clock milliseconds]
+  uplevel 1 $script
+  return [format %.1f [expr { ([clock milliseconds] - $start) / 1000.0 }]]
 }
 
 proc json_obj { kv } {
@@ -41,4 +46,13 @@ proc json_obj { kv } {
     lappend parts "\"$k\": $v"
   }
   return "\{[join $parts {, }]\}"
+}
+
+proc csv_write { path header rows } {
+  set f [open $path w]
+  puts $f [join $header ,]
+  foreach row $rows {
+    puts $f [join $row ,]
+  }
+  close $f
 }
