@@ -58,6 +58,16 @@ make -C $FLOW_HOME DESIGN_CONFIG=$PROJECT_ROOT/flow/designs/asap7/<design>/confi
 
 This writes per-corner setup and hold WNS, TNS and violator counts (in ps) to `work/reports/<design>_<variant>_mcmm.json`.
 
+PVT x RC corner analysis and the Gate 1 check:
+
+```sh
+scripts/corner_sta.sh <design> <period>                 # 3 PVT x 4 RC scenes
+RC_CORNERS="nom cw rcw cb rcb" scripts/corner_sta.sh ...  # also unscaled RC
+.venv/bin/python scripts/gate1_dominance.py <design>_p<period> [--guard 50]
+```
+
+Per-scene results go to `work/corners/<design>_p<period>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly.
+
 ## Layout
 
 | Path | Contents |
@@ -67,6 +77,9 @@ This writes per-corner setup and hold WNS, TNS and violator counts (in ps) to `w
 | `flow/clock_targets.mk` | Clock periods per design (to be recalibrated post-route) |
 | `scripts/run_flow.sh` | Flow wrapper |
 | `scripts/tcl/check_mcmm.tcl` | Per-corner timing summary |
+| `scripts/scale_spef.py` | Scaled RC-corner SPEFs (`cw`, `rcw`, `cb`, `rcb`) from `6_final.spef` |
+| `scripts/corner_sta.sh`, `scripts/tcl/corner_sta.tcl` | Standalone OpenSTA per (PVT, RC) scene: per-endpoint setup/hold slack and runtime |
+| `scripts/gate1_dominance.py` | Gate 1: worst-scene distribution, physics-rule catch rate, greedy cover |
 | `scripts/tcl/lib/mcmm_util.tcl` | Shared STA helpers |
 | `work/` | ORFS `WORK_HOME`: logs, results, reports (ignored) |
 
