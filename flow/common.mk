@@ -13,6 +13,9 @@ export FAST_LIB_FILES    = $(BC_NLDM_LIB_FILES)
 # Single-corner LIB_FILES (yosys/ABC) use the slow corner: setup-driven synthesis.
 export CORNER = WC
 
+# setRC.tcl plus a gui::show stub for the final report (see load_hook.tcl).
+export LAYER_PARASITICS_FILE = $(PROJECT_ROOT)/flow/load_hook.tcl
+
 # eqy and kepler LEC are not part of this flow.
 export EQUIVALENCE_CHECK = 0
 export LEC_CHECK         = 0
