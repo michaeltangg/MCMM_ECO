@@ -20,6 +20,6 @@ export LEC_CHECK         = 0
 # Flat netlist keeps endpoint names and instance handling in the ECO fixer simple.
 export OPENROAD_HIERARCHICAL = 0
 # Arithmetic-operator swapping keeps adders as hierarchical modules and
-# requires OPENROAD_HIERARCHICAL; ibex enables it upstream.
+# requires OPENROAD_HIERARCHICAL; ibex/dynamic_node enable it upstream.
 # ORFS tests for non-empty, so it must be empty rather than 0.
 export SWAP_ARITH_OPERATORS =

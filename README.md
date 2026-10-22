@@ -41,7 +41,7 @@ This puts GNU tools first on `PATH`, pins `OPENROAD_EXE`, `OPENSTA_EXE` and `YOS
 ## Running the flow
 
 ```sh
-scripts/run_flow.sh <design> [period_ps]      # designs: jpeg, ibex
+scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex
 ```
 
 - Stock ORFS timing repair runs in every stage. Tight clocks leave residual violations.
@@ -62,7 +62,7 @@ This writes per-corner setup and hold WNS, TNS and violator counts (in ps) to `w
 | Path | Contents |
 | --- | --- |
 | `flow/common.mk` | MCMM corners and flat-netlist settings; included by every design config |
-| `flow/designs/asap7/<design>/` | Design configs (stock ORFS config + `common.mk`) |
+| `flow/designs/asap7/<design>/` | Design configs (stock ORFS config + `common.mk`; dynamic_node is a new ASAP7 port) |
 | `flow/clock_targets.mk` | Clock periods per design (to be recalibrated post-route) |
 | `scripts/run_flow.sh` | Flow wrapper |
 | `scripts/tcl/check_mcmm.tcl` | Per-corner timing summary |
@@ -77,4 +77,5 @@ This writes per-corner setup and hold WNS, TNS and violator counts (in ps) to `w
 
 Deviations from stock ORFS configs, to disclose:
 
-- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex enables both upstream).
+- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex and dynamic_node enable both upstream).
+- dynamic_node uses the standard ASAP7 SDC template instead of the nangate45 per-port I/O delays.
