@@ -1,9 +1,10 @@
 """Gate 1: is corner dominance non-trivial? (is there anything to prune?)
 
     .venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard PS]
+        [--corners corners_derate]
 
 Reads work/corners/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
-scripts/corner_sta.sh. For each check, an endpoint violates at a scene if its
+scripts/corner_sta.sh (work/corners_derate/ for DERATE=1 runs). For each check, an endpoint violates at a scene if its
 slack is below the guard band. Reports, for PVT only (nominal RC) and for
 PVT x RC (scaled RC corners):
 
@@ -31,14 +32,14 @@ PHYSICS = {
 }
 
 
-def load(run):
+def load(run, corners):
     frames = []
-    for path in sorted((WORK / "corners" / run).glob("*_endpoints.csv")):
+    for path in sorted((WORK / corners / run).glob("*_endpoints.csv")):
         df = pd.read_csv(path)
         df["scene"] = path.name.removesuffix("_endpoints.csv")
         frames.append(df)
     if not frames:
-        raise SystemExit(f"no endpoint CSVs in {WORK / 'corners' / run}")
+        raise SystemExit(f"no endpoint CSVs in {WORK / corners / run}")
     return pd.concat(frames, ignore_index=True)
 
 
@@ -77,10 +78,13 @@ def main():
     ap.add_argument("run", help="<design>_<variant>")
     ap.add_argument("--guard", type=float, default=0.0,
                     help="guard band g in ps: slack < g violates (default 0)")
+    ap.add_argument("--corners", default="corners",
+                    help="results dir under work/ (default corners; "
+                         "corners_derate for DERATE=1 runs)")
     args = ap.parse_args()
 
-    df = load(args.run)
-    print(f"{args.run}, guard band {args.guard} ps")
+    df = load(args.run, args.corners)
+    print(f"{args.run} ({args.corners}), guard band {args.guard} ps")
     for check in ("setup", "hold"):
         wide = df[df.check == check].pivot(index="endpoint", columns="scene",
                                            values="slack_ps")

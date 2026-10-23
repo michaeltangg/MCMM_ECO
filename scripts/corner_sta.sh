@@ -8,7 +8,9 @@
 # standalone OpenSTA once per (PVT, RC) scene. Results land in
 # work/corners/<design>_<variant>/<pvt>_<rc>{_endpoints.csv,.json,.log}.
 #
-# RC_CORNERS (default "cw rcw cb rcb") picks the RC corners; "nom" is the
+# DERATE=1 applies the flat OCV derates in scripts/tcl/derate.tcl and writes to
+# work/corners_derate/ instead, so derated and underated results sit side by
+# side. RC_CORNERS (default "cw rcw cb rcb") picks the RC corners; "nom" is the
 # unscaled 6_final.spef. JOBS (default 4) sets how many scenes run at once;
 # each is single-threaded, so keep JOBS below the free core count for honest
 # per-scene runtimes.
@@ -51,7 +53,13 @@ var() {
   sed -n "s/^$1: //p" <<< "$vars"
 }
 
-out_dir="$WORK_HOME/corners/${design}_$variant"
+corners_dir=corners
+derate=
+if [[ ${DERATE:-0} == 1 ]]; then
+  corners_dir=corners_derate
+  derate="$PROJECT_ROOT/scripts/tcl/derate.tcl"
+fi
+out_dir="$WORK_HOME/$corners_dir/${design}_$variant"
 mkdir -p "$out_dir"
 
 run_scene() {
@@ -63,7 +71,7 @@ run_scene() {
   local prefix="$out_dir/${pvt}_$rc"
   if CORNER_LIBS="$(var "${upper}_LIB_FILES")" CORNER_NETLIST="$results/6_final.v" \
      CORNER_SDC="$results/6_final.sdc" CORNER_SPEF="$scene_spef" \
-     CORNER_TOP="$(var DESIGN_NAME)" CORNER_OUT="$prefix" \
+     CORNER_TOP="$(var DESIGN_NAME)" CORNER_OUT="$prefix" CORNER_DERATE="$derate" \
      "$OPENSTA_EXE" -no_init -exit "$PROJECT_ROOT/scripts/tcl/corner_sta.tcl" \
      > "$prefix.log" 2>&1; then
     echo "$design $variant ${pvt}_$rc ok"

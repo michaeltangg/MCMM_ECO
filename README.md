@@ -64,10 +64,11 @@ PVT x RC corner analysis and the Gate 1 check:
 ```sh
 scripts/corner_sta.sh <design> <variant>                # 3 PVT x 4 RC scenes, e.g. ibex p2150
 RC_CORNERS="nom cw rcw cb rcb" scripts/corner_sta.sh ...  # also unscaled RC
-.venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard 50]
+DERATE=1 scripts/corner_sta.sh <design> <variant>       # flat OCV derates
+.venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard 50] [--corners corners_derate]
 ```
 
-Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly.
+Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly. With `DERATE=1`, the flat OCV derates in [scripts/tcl/derate.tcl](scripts/tcl/derate.tcl) (cells ±5%, nets ±3%, same at every scene) are applied and results go to `work/corners_derate/<design>_<variant>/` instead.
 
 ## Layout
 
@@ -80,6 +81,7 @@ Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene
 | `scripts/tcl/check_mcmm.tcl` | Per-corner timing summary |
 | `scripts/scale_spef.py` | Scaled RC-corner SPEFs (`cw`, `rcw`, `cb`, `rcb`) from `6_final.spef` |
 | `scripts/corner_sta.sh`, `scripts/tcl/corner_sta.tcl` | Standalone OpenSTA per (PVT, RC) scene: per-endpoint setup/hold slack and runtime |
+| `scripts/tcl/derate.tcl` | Flat OCV derates for `DERATE=1` corner STA |
 | `scripts/gate1_dominance.py` | Gate 1: worst-scene distribution, physics-rule catch rate, greedy cover |
 | `scripts/tcl/lib/mcmm_util.tcl` | Shared STA helpers |
 | `work/` | ORFS `WORK_HOME`: logs, results, reports (ignored) |

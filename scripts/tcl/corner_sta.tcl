@@ -9,11 +9,14 @@
 #   CORNER_SPEF     SPEF for the RC corner
 #   CORNER_TOP      top module
 #   CORNER_OUT      output prefix: writes <prefix>_endpoints.csv, <prefix>.json
+#   CORNER_DERATE   optional Tcl file of timing derates, sourced after the SDC
 #
 # The endpoint CSV has the worst path to every constrained endpoint for setup
 # (max) and hold (min). Times are in ps.
 
 source [file join [file dirname [info script]] lib mcmm_util.tcl]
+
+set derate [expr { [info exists ::env(CORNER_DERATE)] ? $::env(CORNER_DERATE) : "" }]
 
 set load_s [timed {
   foreach lib $::env(CORNER_LIBS) {
@@ -22,6 +25,9 @@ set load_s [timed {
   read_verilog $::env(CORNER_NETLIST)
   link_design $::env(CORNER_TOP)
   read_sdc $::env(CORNER_SDC)
+  if { $derate ne "" } {
+    source $derate
+  }
 }]
 set spef_s [timed { read_spef $::env(CORNER_SPEF) }]
 set update_s [timed { sta::find_timing_cmd 1 }]
@@ -48,6 +54,7 @@ set scene [lindex [sta::scenes] 0]
 set f [open "$::env(CORNER_OUT).json" w]
 puts $f [json_obj [list \
   spef "\"$::env(CORNER_SPEF)\"" \
+  derate "\"$derate\"" \
   endpoints [llength [sta::endpoints]] \
   setup_wns [ps [sta::worst_slack_scene $scene max]] \
   setup_tns [ps [sta::total_negative_slack_scene_cmd $scene max]] \
