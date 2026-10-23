@@ -37,7 +37,7 @@ proc scene_metrics { scene } {
 proc timed { script } {
   set start [clock milliseconds]
   uplevel 1 $script
-  return [format %.1f [expr { ([clock milliseconds] - $start) / 1000.0 }]]
+  return [format %.3f [expr { ([clock milliseconds] - $start) / 1000.0 }]]
 }
 
 proc json_obj { kv } {
