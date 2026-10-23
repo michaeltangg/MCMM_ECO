@@ -75,7 +75,7 @@ Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene
 | --- | --- |
 | `flow/common.mk` | MCMM corners and flat-netlist settings; included by every design config |
 | `flow/designs/asap7/<design>/` | Design configs (stock ORFS config + `common.mk`; dynamic_node is a new ASAP7 port) |
-| `flow/clock_targets.mk` | Clock periods per design (to be recalibrated post-route) |
+| `flow/clock_targets.mk` | Calibrated clock periods per design, with measured slow-corner WNS |
 | `scripts/run_flow.sh` | Flow wrapper |
 | `scripts/tcl/check_mcmm.tcl` | Per-corner timing summary |
 | `scripts/scale_spef.py` | Scaled RC-corner SPEFs (`cw`, `rcw`, `cb`, `rcb`) from `6_final.spef` |
