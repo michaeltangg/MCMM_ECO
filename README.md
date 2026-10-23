@@ -41,13 +41,14 @@ This puts GNU tools first on `PATH`, pins `OPENROAD_EXE`, `OPENSTA_EXE` and `YOS
 ## Running the flow
 
 ```sh
-scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex
+scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex, aes
 ```
 
 - Stock ORFS timing repair runs in every stage. Tight clocks leave residual violations.
 - Outputs land in `work/results/asap7/<design>/<variant>/`: `6_final.{odb,v,sdc,spef}`.
 - The flow stops after the final report (which runs OpenRCX and writes the SPEF). GDS merge is skipped, so KLayout isn't needed. [flow/load_hook.tcl](flow/load_hook.tcl) stubs `gui::show`, which the prebuilt OpenROAD lacks in batch mode.
 - With `period_ps`, the design's SDC is copied with `clk_period` rewritten, and results go to the `p<period_ps>` variant. Without it, the variant is `base`.
+- `UTIL=<pct> scripts/run_flow.sh <design> <period_ps>` overrides `CORE_UTILIZATION` (variant `p<period_ps>_u<pct>`). Global placement has no seed, so utilization variants stand in for placement seeds.
 
 Inspect a finished design under all corners:
 
@@ -61,12 +62,12 @@ This writes per-corner setup and hold WNS, TNS and violator counts (in ps) to `w
 PVT x RC corner analysis and the Gate 1 check:
 
 ```sh
-scripts/corner_sta.sh <design> <period>                 # 3 PVT x 4 RC scenes
+scripts/corner_sta.sh <design> <variant>                # 3 PVT x 4 RC scenes, e.g. ibex p2150
 RC_CORNERS="nom cw rcw cb rcb" scripts/corner_sta.sh ...  # also unscaled RC
-.venv/bin/python scripts/gate1_dominance.py <design>_p<period> [--guard 50]
+.venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard 50]
 ```
 
-Per-scene results go to `work/corners/<design>_p<period>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly.
+Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly.
 
 ## Layout
 

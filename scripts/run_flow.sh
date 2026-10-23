@@ -6,6 +6,9 @@
 # Without period_ps the design's own SDC is used (FLOW_VARIANT=base).
 # With period_ps a copy of that SDC with `set clk_period` rewritten is used
 # (FLOW_VARIANT=p<period_ps>), so each clock target gets its own results tree.
+# UTIL=<pct> (with period_ps) overrides CORE_UTILIZATION and appends _u<pct> to
+# the variant: global placement has no seed, so utilization variants stand in
+# for placement seeds.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -52,7 +55,15 @@ if [[ -n $period ]]; then
   else
     mv "$sdc.tmp" "$sdc"
   fi
-  make_args+=(FLOW_VARIANT="p$period" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
+  variant="p$period"
+  if [[ -n ${UTIL:-} ]]; then
+    variant+="_u$UTIL"
+    make_args+=(CORE_UTILIZATION="$UTIL")
+  fi
+  make_args+=(FLOW_VARIANT="$variant" SDC_FILE="$sdc" ABC_CLOCK_PERIOD_IN_PS="$period")
+elif [[ -n ${UTIL:-} ]]; then
+  echo "UTIL needs period_ps" >&2
+  exit 1
 fi
 make_args+=("$@")
 

@@ -1,8 +1,8 @@
 """Gate 1: is corner dominance non-trivial? (is there anything to prune?)
 
-    .venv/bin/python scripts/gate1_dominance.py <design>_p<period> [--guard PS]
+    .venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard PS]
 
-Reads work/corners/<design>_p<period>/<pvt>_<rc>_endpoints.csv from
+Reads work/corners/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
 scripts/corner_sta.sh. For each check, an endpoint violates at a scene if its
 slack is below the guard band. Reports, for PVT only (nominal RC) and for
 PVT x RC (scaled RC corners):
@@ -74,7 +74,7 @@ def report(slack, rule, guard):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("run", help="<design>_p<period>")
+    ap.add_argument("run", help="<design>_<variant>")
     ap.add_argument("--guard", type=float, default=0.0,
                     help="guard band g in ps: slack < g violates (default 0)")
     args = ap.parse_args()
