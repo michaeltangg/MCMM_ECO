@@ -41,7 +41,7 @@ This puts GNU tools first on `PATH`, pins `OPENROAD_EXE`, `OPENSTA_EXE` and `YOS
 ## Running the flow
 
 ```sh
-scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex, aes
+scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex, aes, riscv32i, ethmac
 ```
 
 - Stock ORFS timing repair runs in every stage. Tight clocks leave residual violations.
@@ -94,5 +94,7 @@ Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene
 
 Deviations from stock ORFS configs, to disclose:
 
-- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex and dynamic_node enable both upstream).
+- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex, dynamic_node and riscv32i enable both upstream).
 - dynamic_node uses the standard ASAP7 SDC template instead of the nangate45 per-port I/O delays.
+- riscv32i's dmem SRAM (`fakeram7_256x32`) has a TT-only Liberty model, read unchanged at every PVT corner. Its 168 input pins never violate, and no endpoint's worst path launches from it (checked at 1950 ps).
+- ethmac's tx/rx clocks are 0.8 × `clk_period` instead of a fixed 300 ps, so a clock sweep moves all three domains.
