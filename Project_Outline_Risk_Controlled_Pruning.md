@@ -1,17 +1,17 @@
 # Risk-Controlled Pruning for Timing Closure: Conformal Guarantees for MCMM Corner Reduction and ECO Candidate Filtering
 
-Oct 22, 2026 · @Michael
+Oct 22, 2026 (updated Oct 23) · @Michael
 
 ## Problem
 
 Timing closure repeats expensive evaluations that are rarely all needed: signoff STA runs every corner, and ECO repair runs incremental STA on every candidate move. Existing ways of skipping work are either heuristics or accurate predictors with no stated bound on what they miss.
 
-- **Corners:** MCMM signoff runs STA at every combination of process, voltage and temperature (PVT) corner and RC extraction corner. Most corners never set the worst slack for most paths, but which ones matter is path-dependent: wire-dominated paths tend to be worst at RC-worst extraction and cell-dominated paths at C-worst, and temperature inversion at low voltage breaks simple "slow-hot is always worst" rules.
+- **Corners:** MCMM signoff runs STA at every combination of process, voltage and temperature (PVT) corner and RC extraction corner. Most corners never set the worst slack for most paths, but which ones matter is path-dependent. On our data, hold paths launched from input ports are worst at the slow corner (their input delay does not scale with the corner while the capture clock does), while self-loop and register-to-register hold paths are worst at the fast corner.
 - **ECO candidates:** a repair loop enumerates many resize moves per violating endpoint and verifies each with incremental STA, though only the best one is applied.
 - **How it is handled today:** dominant-scenario selection and dominance relations (heuristic), ML prediction of unobserved corners (accurate on average, no guarantee), and scenario compression in commercial tools. ML gate sizers improve solution quality but do not prune candidates with a stated error bound.
-- **The gap:** none of these lets the engineer choose an acceptable miss rate and have the pruner provably stay under it. Signoff needs that property; average-error statistics do not provide it.
+- **The gap:** none of these lets the engineer choose an acceptable miss rate and have the pruner provably stay under it. Verification runs need that property; average-error statistics do not provide it.
 
-**Research question:** can conformal risk control turn a learned timing predictor into a pruner with a user-chosen bound on missed violations (corners) or lost best moves (ECO), how much STA work does it save at each bound, and does the guarantee survive transfer to a design it was not calibrated on?
+**Research question:** can conformal calibration turn a learned timing predictor into a pruner with a user-chosen bound on missed violations (corners) or lost best moves (ECO), how much STA work does it save at each bound, and does the guarantee survive transfer to a design it was not calibrated on?
 
 ## Related work and positioning
 
@@ -32,15 +32,17 @@ Predicting timing at unobserved corners is solved well on average; conformal pru
 
 **Positioning:** to our knowledge, the first distribution-free miss-rate guarantee for MCMM corner reduction, plus a measurement of whether conformal candidate pruning stays calibrated inside an incremental-STA repair loop. Re-check Google Scholar before submission.
 
+**Target use:** the signoff-quality STA runs repeated during the closure loop (for example after each ECO round), which today run either every scene or a dominant subset with no bound on misses. The final tapeout run still runs every scene. Scenes run in parallel on a farm, so savings are reported as compute, not wall-clock.
+
 ## Proposed solution
 
-One method, two applications: a learned predictor ranks expensive evaluations, conformal calibration sets the pruning threshold so the miss rate stays below a user-chosen α, and only the retained evaluations are run. α is the single knob: loose for fast early exploration, tight for signoff.
+One method, two applications: a learned predictor ranks expensive evaluations, conformal calibration sets the pruning threshold so the miss rate stays below a user-chosen α, and only the retained evaluations are run. Setup and hold each get their own α (α_setup, α_hold), because a hold escape after silicon fails at every frequency, while a setup escape can be binned.
 
 ### Part A (core): corner pruning with guaranteed violation recall
 
-Run STA at a small set of anchor corners A. For every endpoint e and every unobserved (corner, check) unit c (setup and hold handled separately), a model predicts slack ŝ_c(e).
+Run STA at two anchor scenes, A = {`fast_cb`, `slow_rcw`}. For every endpoint e, every other scene c and each check, a model predicts slack ŝ_c(e).
 
-**Calibration (class-conditional split conformal).** On calibration designs where every corner was run, take the n endpoint–corner pairs that truly violate (slack below guard band g). Set the threshold at their conformal quantile of predicted slack:
+**Calibration (class-conditional split conformal, per check).** On calibration runs where every scene was run, take the n endpoint–scene pairs that truly violate (slack below guard band g). Set the threshold at their conformal quantile of predicted slack:
 
 ```latex
 \hat{\tau} = \hat{s}_{(k)}, \quad k = \left\lceil (1-\alpha)(n+1) \right\rceil
@@ -50,17 +52,22 @@ Run STA at a small set of anchor corners A. For every endpoint e and every unobs
 
 where ŝ_(k) is the k-th smallest predicted slack among calibration violators. A pair is flagged if ŝ_c(e) ≤ τ̂.
 
-**Decision.** A (corner, check) unit is skipped only if none of its endpoints are flagged. Guarantee: at least 1−α of true violations fall in units that get run. Realized misses can only be lower, because a run unit catches all its violations, flagged or not.
+**Decision.** The decision unit is the scene, because loading the design, the SPEF and `update_timing` take over 99% of a scene's runtime and are shared by both checks. A scene runs if it is an anchor or if any endpoint is flagged by either check; otherwise it is skipped. Guarantee per check: at least 1−α of violating pairs are flagged (pair recall). Violation recall, the share of violations in scenes that run, can only be higher, because a run scene catches every violation in it, flagged or not.
 
-**Inputs (per endpoint):**
+**Two calibration modes.**
 
-- Slack, arrival and required time at each anchor corner, setup and hold
-- Data-path delay split into cell delay and wire delay; number of stages
-- Cell mix along the worst path (e.g., share of high-stack cells, which are more voltage-sensitive)
-- Average stage slew and load; clock latency and skew at anchors
-- Target corner descriptors (process, voltage, temperature, R and C scale factors) so one model can serve all unobserved corners
+- **New design:** calibrate on other designs. Violation recall stays ≥ 99.7%, but only because flagged endpoints pull whole scenes in: pair recall, the guaranteed quantity, fails on designs whose violators differ from the calibration designs (aes, dynamic_node), and savings vary strongly with which runs land in calibration.
+- **Design with a few full runs:** calibrate on those runs. Pair recall then tracks 1−α within about one point, so α means what it says.
 
-**Model:** XGBoost/LightGBM per check type with corner descriptors as features; Kahng-style linear regression as the accuracy baseline. The conformal step is model-agnostic: a worse model gives a looser threshold and fewer skipped corners, never a broken guarantee.
+Exchangeability holds across runs, not across pairs within a run, so expect a shortfall of about one point against 1−α; state it, or use a run-clustered calibration if it matters.
+
+**Inputs (per endpoint, per check):**
+
+- **Main (F1):** slack, arrival and required time at both anchors. These come from the standard scene output, so no extra STA queries are needed.
+- **Ablation (F2):** worst hold path per startpoint class (input port, other register, same register) at each anchor, with capture clock delay, CRPR credit and hold time. Helps with a single anchor; did not help with two.
+- **Not implemented (ablation candidates):** data-path cell vs wire delay, stage count, cell mix, slew and load, clock-path makeup. Expected to matter with real multi-corner extraction more than with scaled RC corners.
+
+**Model:** LightGBM, one model per target scene and check, predicting the change from the lower anchor slack, with extra weight on near-critical pairs. Kahng-style linear regression is the accuracy baseline. Any gradient-boosted tree model would do; the conformal step is model-agnostic, so a worse model gives a looser threshold and fewer skipped scenes, never a broken guarantee.
 
 ### Part B (stretch, gated): ECO candidate pruning with best-move retention
 
@@ -75,103 +82,115 @@ where m*_i is the STA-measured best move in calibration instance i. λ̂ is the 
 
 **The interesting part:** exchangeability is strained here, because candidates change as repair progresses. Measure coverage across early, middle and late repair iterations, and compare static calibration against adaptive conformal inference if coverage drifts.
 
-&#91;flow: anchor STA → predict unobserved slack → conformal threshold (α) → run only flagged corners → report misses\]
+&#91;flow: anchor STA → predict slack at other scenes → conformal threshold per check (α_setup, α_hold) → run flagged scenes → report misses\]
 
 ## Experimental setup
 
-Signoff-style STA over PVT × RC corners on Sky130, with ASAP7 as the fallback platform. The method consumes only STA outputs, so it transfers to commercial STA unchanged.
+Signoff-style STA over PVT × RC scenes on ASAP7, chosen at Gate 1. The method consumes only STA outputs, so it transfers to commercial STA unchanged.
 
 | Item | Choice | Note |
 | --- | --- | --- |
-| Flow | OpenROAD-flow-scripts, OpenSTA for all corner analysis | Fully scriptable; every STA run timed |
-| PDK (primary) | Sky130, sky130_fd_sc_hd | Ships many PVT Liberty corners, including low-voltage cold corners where temperature inversion may make dominance path-dependent; confirm the exact list from the PDK |
-| PDK (fallback) | ASAP7 (7nm predictive) | Only three PVT corners in ORFS (confirm from the files), but wires dominate delay, so RC corners matter more: 3 PVT × 4 RC = 12 corners. Matches the advanced-node story |
-| Corner set | PVT corners, then RC corners (C-worst, RC-worst, C-best, RC-best style) | RC corners built by scaling R and C separately; loaded with `define_corners` and `read_spef -corner`. Flat standard derates only; no artificial per-corner derates |
+| Flow | OpenROAD-flow-scripts, standalone OpenSTA per scene | Fully scriptable; every scene timed by phase |
+| PDK | ASAP7 (7nm predictive) | Three PVT corners: SS 0.63 V 100 C, TT 0.70 V 25 C, FF 0.77 V 0 C |
+| Scenes | 3 PVT × 4 RC = 12 | RC corners `cw`, `rcw`, `cb`, `rcb` built by scaling R and C of one extracted SPEF |
+| Derates | Flat OCV derates: cells ±5%, nets ±3%, early/late, same at every scene | Textbook values, not tuned. CRPR on (OpenSTA default). No per-corner derates and no clock uncertainty (a flat uncertainty only shifts g) |
+| Guard bands | g_setup = 0, g_hold = 40 ps | Literature puts post-route hold margin at 20–40 ps and signoff remainder at about 5 ps. Derates cover about 10 ps of that; g covers the unmodelled rest (crosstalk, uncertainty, extraction) |
 | Stage | Post-route, extracted SPEF from the ORFS final stage | Signoff-like; scaled RC corners approximate multi-corner extraction (limitation) |
-| Designs | Calibrate on aes and jpeg; hold out ibex; riscv32i optional on Sky130 | Confirm each completes on the chosen platform |
-| Data variety | Several clock targets and placement seeds per design | Creates violations and gives multiple design instances for calibration studies |
-| Anchor corners | Chosen greedily (most violations covered) and by physics rule (slowest setup, fastest hold) | Compared as part of the study |
+| Designs | aes, dynamic_node, ibex, jpeg; riscv32i, ethmac optional | Every design is held out in turn |
+| Data variety | 37 runs: 6–7 clock targets per design plus utilization variants | Global placement has no seed; utilization variants stand in for seeds |
+| Anchors | `fast_cb` + `slow_rcw` | `slow_rcw` is the setup physics corner; `fast_cb` (not `fast_rcb`) is the usual hold-worst scene |
+| Evaluation | Leave-one-design-out; target-design calibration with k ∈ {1, 2, 3, 5} runs, 20 random splits | Cross-design and within-design calibration measured separately |
 | ECO fixer (Part B) | Own greedy fixer, resize moves via `replace_cell` | Same fixer for pruned and unpruned runs |
-| Model | XGBoost/LightGBM; linear regression baseline | Small tabular data; fast to train |
-| Conformal | Class-conditional split conformal (Part A); conformal set calibration (Part B) | A few dozen lines of code; no library dependence |
+| Model | LightGBM; linear regression baseline | Small tabular data; fast to train |
+| Conformal | Pair-level split conformal per check (Part A); conformal set calibration (Part B) | A few dozen lines of code; no library dependence |
 
 ## Step-by-step breakdown
 
 Eight days, with go/no-go gates before any modeling and before starting Part B.
 
-1. **Flow bring-up (Oct 22).** Run aes, jpeg and ibex through ORFS on sky130hd at tightened clocks; collect final SPEF; list available Liberty corners.
-2. **Gate 1: is there anything to prune? (Oct 22, platform decided by end of day).** Run all corners on one design and check setup and hold separately (hold may be less clean because clock-tree and data-path delays scale differently, shifting skew). Escalate only as far as needed:
-   1. **Sky130, PVT corners only.** If the slowest setup corner and fastest hold corner do not catch every violation, continue on Sky130.
-   2. **Sky130, PVT × RC corners.** If PVT dominance is trivial, add scaled RC corners and re-check.
-   3. **Switch to ASAP7, PVT × RC corners.** If dominance is still trivial, or for a stronger advanced-node story. Reuses the ASAP7 bring-up planned for the earlier hold-cost project.
-
-   Do not bring up both platforms in parallel. Do not inject random derates to manufacture non-trivial dominance; a model that learns injected derates proves nothing.
-3. **Dataset generation (Oct 23).** All designs × variants × corners; per-endpoint setup and hold slack plus path features from anchor runs. Log STA runtime per (corner, check).
-4. **Models and calibration (Oct 24).** Train slack predictors; implement the conformal threshold; implement baselines.
-5. **Evaluation (Oct 25).** α sweep in-distribution and on held-out ibex, with zero and small amounts of ibex calibration data. Analyze where misses land.
-6. **Gate 2: start Part B? (Oct 26).** Only if Part A results and figures are complete.
+1. **Flow bring-up (Oct 22). Done.** aes, dynamic_node, ibex and jpeg on ASAP7 at calibrated clock targets.
+2. **Gate 1: is there anything to prune? (Oct 22). Passed.** With derates and g_hold = 40, the hold physics rule (`fast_rcb`) catches 14 of 635 violating endpoints in aes and 0 of 213 in dynamic_node. Setup's worst scene is always one of two slow scenes, but 34–45% of setup violations sit in other scenes.
+3. **Dataset generation (Oct 23). Done.** 37 runs × 12 derated scenes, per-endpoint setup and hold slack, runtime per phase.
+4. **Models and calibration (Oct 24).** Move the prototype into repo scripts: predictor, pair-level calibration, both calibration modes, baselines.
+5. **Evaluation (Oct 25).** α sweep per check on the combined run set; target-design calibration vs k; miss analysis by startpoint class; main trade-off figure.
+6. **Gate 2: start Part B? (Oct 26).** Only if Part A results and figures are complete. Part A has grown, so Part B is likely to be a short preliminary section.
 7. **Part B (Oct 26–27).** Greedy fixer, candidate enumeration with STA-measured gains, conformal set pruning, coverage across repair iterations.
-8. **Ablations and figures (Oct 28).** Feature ablation, anchor-set size, guard band g, calibration-set size.
-9. **Writeup (Oct 29–30).** Final document and slides; deadline Oct 30, 11:59 PM. Problem, related work and method drafted in parallel from day 1.
+8. **Ablations and figures (Oct 28).** F2 vs F1, one vs two anchors, guard band g, calibration-set size.
+9. **Writeup (Oct 29–30).** Final document and slides; deadline Oct 30, 11:59 PM.
 
 ## Baselines and comparison metrics
 
 **Part A variants:**
 
-1. **Run all corners:** ground truth and runtime ceiling.
-2. **Physics rule:** run slowest corner for setup and fastest for hold only.
-3. **Dominant-corner heuristic:** keep corners that were worst for any endpoint on calibration designs.
-4. **Point predictor + fixed margin:** ML or linear prediction with an empirical margin (Kahng / patent-style).
-5. **Conformal pruner (proposed):** same predictor, conformal threshold at chosen α.
+1. **Run all scenes:** ground truth and runtime ceiling.
+2. **Physics rule:** `slow_rcw` for setup and `fast_rcb` for hold only.
+3. **Dominant-scene heuristic:** keep every scene that was some violating endpoint's worst, learned from other designs (cross-design) or from other runs of the same design (same-design history).
+4. **Point predictor + fixed margin:** same predictor with an empirical margin (Kahng / patent-style). Sweeping the margin traces the same skip-vs-recall curve as sweeping α, so the comparison is whether the chosen point meets its recall target, not skip at equal recall.
+5. **Conformal pruner (proposed):** same predictor, conformal threshold per check.
+6. **Oracle ceiling:** skip exactly the scenes with no violations.
 
 **Part B variants:** no pruning; fixed top-k; analytical first-order gain estimate (cell delay change plus driver resistance × added input capacitance) with the same conformal step; learned gain predictor with conformal step.
 
 | Metric | Definition | Why it matters |
 | --- | --- | --- |
-| Violation recall | Fraction of true violations in (corner, check) units that were run | The guaranteed quantity; must be ≥ 1−α |
-| STA work saved | Fraction of (corner, check) units skipped; wall-clock saved | The payoff |
-| Net runtime | STA saved minus anchor runs, feature extraction, inference and calibration | Honest accounting |
-| Coverage on new design | Recall on held-out ibex vs. amount of ibex calibration data | Tests the exchangeability assumption |
-| Miss distribution | Misses by slack range, path depth, clock domain | Average coverage can hide clustered failures |
+| Pair recall | Fraction of violating (endpoint, scene) pairs flagged | The guaranteed quantity; ≥ 1−α |
+| Violation recall | Fraction of violating pairs in scenes that run | What verification needs; ≥ pair recall |
+| Endpoint recall | Fraction of violating endpoints seen in at least one scene that runs | What fixing needs; the heuristic's home metric |
+| Worst-scene recall | Fraction of violating endpoints whose worst scene runs | Fixing against a non-worst scene under-fixes |
+| Scenes skipped | Fraction of all 12 scenes not run (setup ∪ hold flags, anchors counted as run) | The payoff, as compute |
+| Net runtime | Compute saved minus anchor runs, feature extraction, inference and calibration | Honest accounting |
+| Coverage on new design | Pair and violation recall per held-out design, vs. number of target-design calibration runs | Tests exchangeability |
+| Miss distribution | Misses by startpoint class, slack range, scene | Average coverage can hide clustered failures |
 | Best-move retention (B) | Fraction of repair steps where the STA-best move survived pruning | The Part B guarantee |
 | STA calls and final WNS/TNS (B) | Incremental timing updates per repair; final timing vs. unpruned fixer | Savings at equal quality |
 
-**Primary claim tested:** at α = 1%, the conformal pruner keeps violation recall ≥ 99% while skipping more corners than the dominant-corner and fixed-margin baselines achieve at the same recall.
+**Primary claim tested:** for verification runs that need near-complete violation recall, the conformal pruner keeps violation recall ≥ 99% for both checks with a stated bound, and captures 40–84% of the available savings so far (most on aes and dynamic_node, least on jpeg and ibex). The dominance heuristic and the physics rule skip more but miss many violations and cannot be tuned toward full recall. The heuristic is not beaten on endpoint or worst-scene recall, and the writeup says so.
 
-## Expected outcomes, risks and limitations
+## Results to date (prototype, Oct 23)
 
-Every outcome is reportable, because the guarantee and its failure modes are both measurable.
+Prototype scripts live outside the repo; numbers below are from derated STA, g_setup = 0, g_hold = 40.
 
-| Outcome | What it shows |
-| --- | --- |
-| Conformal pruner skips more work than baselines at equal recall | Guaranteed pruning is practical, not just safe |
-| Guarantee holds in-distribution but breaks on ibex | Quantifies how much new-design calibration a deployment needs |
-| Physics rule is already near-optimal on PVT corners but not PVT × RC | Dominance flips come from wire/cell balance; supports pruning across RC corners specifically |
-| Physics rule is near-optimal even with RC corners | Corner dominance is clean on this platform; the method matters where it is not (stated as finding) |
-| Part B coverage drifts across repair iterations | Static conformal filters are unsafe inside adaptive loops; motivates adaptive calibration |
+- **Derates:** hold slack drops by a median of 7–12 ps per design, up to 42 ps. Self-loops lose least, because CRPR cancels their clock pessimism; port-launched and long-branch register paths lose most.
+- **Prediction is easy with two anchors:** linear regression reaches 1.4–1.5 ps RMSE on near-critical hold pairs. Largely by construction: scaled RC corners make cross-corner slack nearly linear.
+- **One anchor:** `fast_cb` alone cannot see slow-corner port paths (4% hold recall on aes). `slow_rcw` alone plus F2 holds recall but skips less than two anchors with F1.
+- **Main configuration, cross-design, α = 1% per check, 5 random fit/calibration splits:** 34 ± 1 / 46 ± 11 / 13 ± 12 / 6 ± 4% of scenes skipped (aes / dynamic_node / ibex / jpeg) against ceilings of 43 / 55 / 27 / 15% (anchors always run). Violation recall is 100% in every split. Pair recall misses its target on aes (setup 81%, hold 54%) and dynamic_node (hold 68 ± 34%). An earlier single split gave 35 / 52 / 28 / 10% and was a favourable draw.
+- **Misses cluster by startpoint class and sit near the guard band:** port-launched paths are 8% of violating hold pairs but 53% of unflagged ones, and every unflagged hold violator in aes and dynamic_node is port-launched. 84% of unflagged hold violators are within 10 ps of g. Only 0.2% of unflagged violators fall in a skipped scene.
+- **α_hold = 0.1%** needs about 1,000 violating calibration pairs. With target-design calibration only jpeg and aes (k = 5) have enough; elsewhere it runs every scene, and on aes it still under-covers (98.7%).
+- **Heuristics:** the same-design dominance heuristic skips 58–83% with 54–65% setup and 56–82% hold violation recall; the physics rule skips 83% at 20–65%. Both reach about 100% endpoint and worst-scene recall.
+- **Cross-design α does not predict violation recall:** at α = 50%, hold violation recall is still ≥ 99.8%.
+- **Target-design calibration:** pair recall tracks 1−α within about one point on ibex, jpeg and dynamic_node; violation recall stays 96–100%. aes runs span two regimes (port-path hold at tight clocks, none at loose clocks), so a few calibration runs under-cover (setup pair recall 84% at α = 1% with k = 1). Designs with few violators (dynamic_node hold) fall back to running every scene at small α.
+
+## Risks and limitations
 
 | Risk | Mitigation |
 | --- | --- |
-| Corner dominance is trivial on Sky130 | Gate 1 on day 1; add RC corners; switch to ASAP7 PVT × RC if still trivial |
-| ASAP7 switch costs bring-up time | Decide platform by end of Oct 22; prior ASAP7 planning reused; designs already scoped |
-| Too few violations for class-conditional calibration | Tighter clocks, more variants, guard band g > 0 |
-| STA runtime too small to make savings impressive | Report fractions and scaling with design size and corner count |
+| Savings capped by the ceiling (15–55% of scenes are clean) | Report savings relative to the ceiling; more corners would raise it, but more scaled RC corners would inflate savings artificially |
+| Prediction looks trivial with scaled RC corners | State it; put the contribution in the guarantee, anchor choice and transfer analysis |
+| Too few violations for calibration in some designs | g_hold = 40; fall back to cross-design calibration; report per design |
+| STA runtime per scene is small (2–8 s) | Report compute fractions and scaling with corner count; keep anchor-side extraction to the standard outputs (F2's per-class query costs about 1.8 s per anchor) |
 | Part B not reached | Part A stands alone; Part B becomes a short preliminary section |
 
 **Limitations to state up front:**
 
-- Sky130 is a mature node, and ASAP7 is predictive with only three PVT corners; neither has LVF/POCV variation data, so flat derates only.
-- RC corners are approximated by scaling R and C from one extraction, not by separate extraction rule decks.
-- The guarantee is marginal (average over endpoints), not per-path, and assumes calibration and test data are exchangeable.
+- ASAP7 is predictive with only three PVT corners and no LVF/POCV data, so flat derates only.
+- RC corners are approximated by scaling R and C from one extraction, not by separate extraction rule decks, which makes cross-corner prediction close to linear.
+- Non-trivial hold dominance comes mainly from ORFS's I/O constraint template (input delay = 20% of the clock period) combined with derates. It is real STA behaviour, but is presented as I/O-launched hold paths, not temperature inversion.
+- The guarantee is marginal (average over pairs), not per-path. It assumes exchangeability, which holds across runs rather than across pairs within a run, and breaks across designs.
 - Few designs; generalization claims stay modest.
 
 ## Future work
 
 - **Risk-controlled hold-cost prediction for setup repair.** Setup fixes in the slow corner speed up cells that short paths share, consuming fast-corner hold margin that hold repair later pays back with buffers. The calibration machinery used here extends directly: alongside predicted setup gain, each candidate move would carry a conformal upper bound on the fast-corner hold slack it consumes, so moves are penalized only when the bound indicates likely new hold violations. The corner pruner decides which slow and fast corners need full analysis. This requires a flow that models useful skew and scan-path hold fixing realistically, so it is left to evaluation in an industrial setting.
 - **Signoff extraction corners.** Replace scaled RC corners with separate extraction rule decks per RC corner.
-- **Adaptive calibration across designs.** Weighted or adaptive conformal methods to keep the guarantee valid on new designs with little calibration data.
+- **Adaptive calibration across designs.** Weighted or adaptive conformal methods to keep the guarantee valid on new designs with little calibration data, including pooling cross-design and target-design calibration data.
+- **Endpoint-level guarantee.** Bound missed endpoints instead of missed pairs, to compete with the dominance heuristic on its own metric.
 
 ## Approaches considered and rejected
 
 - **Ripple-aware ECO pruning (predict net path Δslack including driver loading):** driver loading is already handled by sizers and by incremental STA; a first-order formula captures most of it.
 - **Predictive NDR / layer assignment:** auto NDR and timing-driven layer assignment already exist commercially and in research (TILA, CPLA, MiniDelay); per-net labels ignore joint congestion, and router DRC behavior does not transfer across tools.
+- **Run-level conformal risk control (calibrate the per-run miss fraction directly):** skips more, but breaks across designs (ibex hold violation recall 41% at α = 10%) and cannot go below α ≈ 7% with 13–15 calibration runs.
+- **Scene-level conformal (score = lowest predicted slack in a scene):** fails its guarantee by up to 13–15 points with target-design calibration (2–25 violating calibration scenes), and skips more than pair-level only by losing violation recall.
+- **`fast_cb` as the only anchor:** misses slow-corner port-path hold violations.
+- **Per-class startpoint features as the default:** extra STA query cost; helped only in the one-anchor configuration. Kept as an ablation.
+- **XGBoost:** not compared; equivalent on data of this size, and the guarantee does not depend on the model.
