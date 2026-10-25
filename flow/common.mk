@@ -5,10 +5,12 @@
 # Three PVT corners read by scripts/read_liberty.tcl:
 #   define_corners $CORNERS; read_liberty -corner <c> $<UPPER(c)>_LIB_FILES
 # Recursive '=' so the platform lists (set later) are used.
+# Macro Liberty (ADDITIONAL_LIBS, the fakeram SRAMs) is TT only, so the same
+# model is read at every PVT corner.
 export CORNERS           = slow typical fast
-export SLOW_LIB_FILES    = $(WC_NLDM_LIB_FILES)
-export TYPICAL_LIB_FILES = $(TC_NLDM_LIB_FILES)
-export FAST_LIB_FILES    = $(BC_NLDM_LIB_FILES)
+export SLOW_LIB_FILES    = $(WC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)
+export TYPICAL_LIB_FILES = $(TC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)
+export FAST_LIB_FILES    = $(BC_NLDM_LIB_FILES) $(ADDITIONAL_LIBS)
 
 # Single-corner LIB_FILES (yosys/ABC) use the slow corner: setup-driven synthesis.
 export CORNER = WC
