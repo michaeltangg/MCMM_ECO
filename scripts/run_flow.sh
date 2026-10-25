@@ -9,6 +9,8 @@
 # UTIL=<pct> (with period_ps) overrides CORE_UTILIZATION and appends _u<pct> to
 # the variant: global placement has no seed, so utilization variants stand in
 # for placement seeds.
+# STOP_AT=synth|cts stops after that stage (clock calibration probes); a later
+# run without it resumes from there.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -70,7 +72,19 @@ make_args+=("$@")
 results=$(orfs_make -s print-RESULTS_DIR | sed 's/^RESULTS_DIR: //')
 logs=$(orfs_make -s print-LOG_DIR | sed 's/^LOG_DIR: //')
 
-echo "[run_flow] $design ${period:+@ ${period}ps }-> $results"
-# The final report writes 6_final.{odb,v,spef}; GDS (KLayout) isn't needed.
-orfs_make "$logs/6_report.log" "$results/6_final.sdc"
-echo "[run_flow] done: $results/6_final.odb, $results/6_final.spef"
+echo "[run_flow] $design ${period:+@ ${period}ps }-> $results${STOP_AT:+ (stop at $STOP_AT)}"
+case ${STOP_AT:-} in
+  "")
+    # The final report writes 6_final.{odb,v,spef}; GDS (KLayout) isn't needed.
+    orfs_make "$logs/6_report.log" "$results/6_final.sdc"
+    echo "[run_flow] done: $results/6_final.odb, $results/6_final.spef"
+    ;;
+  synth|cts)
+    orfs_make "$STOP_AT"
+    echo "[run_flow] done: $STOP_AT"
+    ;;
+  *)
+    echo "STOP_AT must be synth or cts, not '$STOP_AT'" >&2
+    exit 1
+    ;;
+esac
