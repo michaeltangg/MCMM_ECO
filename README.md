@@ -41,7 +41,7 @@ This puts GNU tools first on `PATH`, pins `OPENROAD_EXE`, `OPENSTA_EXE` and `YOS
 ## Running the flow
 
 ```sh
-scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex, aes, riscv32i, ethmac
+scripts/run_flow.sh <design> [period_ps]      # designs: dynamic_node, jpeg, ibex, aes, riscv32i, ethmac, cva6, swerv_wrapper
 ```
 
 - Stock ORFS timing repair runs in every stage. Tight clocks leave residual violations.
@@ -94,7 +94,8 @@ Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene
 
 Deviations from stock ORFS configs, to disclose:
 
-- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex, dynamic_node and riscv32i enable both upstream).
+- `OPENROAD_HIERARCHICAL=0` with `SWAP_ARITH_OPERATORS` cleared (ibex, dynamic_node, riscv32i and swerv_wrapper enable both upstream).
 - dynamic_node uses the standard ASAP7 SDC template instead of the nangate45 per-port I/O delays.
-- riscv32i's dmem SRAM (`fakeram7_256x32`) has a TT-only Liberty model, read unchanged at every PVT corner. Its 168 input pins never violate, and no endpoint's worst path launches from it (checked at 1950 ps).
+- SRAM macros (fakeram, in riscv32i, cva6 and swerv_wrapper) have one Liberty model with a flat 50 ps setup/hold constraint, read unchanged at every PVT corner. Endpoints on SRAM pins are left out of the endpoint CSVs (`corner_sta.tcl`): 2.8% of endpoints, 2.8% of setup and 1.7% of hold violating pairs over the 12 derated scenes. No endpoint's worst path launches from an SRAM in any scene.
 - ethmac's tx/rx clocks are 0.8 × `clk_period` instead of a fixed 300 ps, so a clock sweep moves all three domains.
+- swerv_wrapper uses NLDM instead of the stock CCS Liberty, which ASAP7 ships only at FF.

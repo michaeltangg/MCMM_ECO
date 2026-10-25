@@ -12,7 +12,8 @@
 #   CORNER_DERATE   optional Tcl file of timing derates, sourced after the SDC
 #
 # The endpoint CSV has the worst path to every constrained endpoint for setup
-# (max) and hold (min). Times are in ps.
+# (max) and hold (min), except endpoints on SRAM macro pins. Times are in ps.
+# The JSON summary (endpoints, WNS, TNS) still covers all endpoints.
 
 source [file join [file dirname [info script]] lib mcmm_util.tcl]
 
@@ -32,12 +33,24 @@ set load_s [timed {
 set spef_s [timed { read_spef $::env(CORNER_SPEF) }]
 set update_s [timed { sta::find_timing_cmd 1 }]
 
+# Endpoints on SRAM macro pins are left out: every fakeram Liberty has a flat
+# 50 ps setup/hold constraint read unchanged at every corner, so their labels
+# carry a placeholder, not corner behavior.
+set ::sram_pins [dict create]
+foreach pin [get_pins -quiet -of_objects [get_cells -quiet -hier -filter "ref_name =~ fakeram*"]] {
+  dict set ::sram_pins [get_full_name $pin] 1
+}
+
 # Worst path per endpoint for one check, as CSV rows.
 proc endpoint_rows { min_max check } {
   set rows {}
   foreach pe [find_timing_paths -path_delay $min_max -group_path_count 1000000 \
                 -endpoint_path_count 1 -unique_paths_to_endpoint] {
-    lappend rows [list [get_full_name [$pe pin]] $check \
+    set end [get_full_name [$pe pin]]
+    if { [dict exists $::sram_pins $end] } {
+      continue
+    }
+    lappend rows [list $end $check \
       [ps [$pe slack]] [ps [$pe data_arrival_time]] [ps [$pe data_required_time]]]
   }
   return $rows
