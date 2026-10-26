@@ -68,7 +68,17 @@ DERATE=1 scripts/corner_sta.sh <design> <variant>       # flat OCV derates
 .venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard 50] [--corners corners_derate]
 ```
 
-Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly. With `DERATE=1`, the flat OCV derates in [scripts/tcl/derate.tcl](scripts/tcl/derate.tcl) (cells ±5%, nets ±3%, same at every scene) are applied and results go to `work/corners_derate/<design>_<variant>/` instead.
+Per-scene results go to `work/corners/<design>_<variant>/`. Each endpoint CSV row has the worst setup or hold path's slack, arrival and required time, and `start_class`: whether it launches from an input port, the endpoint's own instance (`self`) or another instance (`reg`). The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly. With `DERATE=1`, the flat OCV derates in [scripts/tcl/derate.tcl](scripts/tcl/derate.tcl) (cells ±5%, nets ±3%, same at every scene) are applied and results go to `work/corners_derate/<design>_<variant>/` instead.
+
+Part A, conformal corner pruning over the derated scenes, each design held out in turn:
+
+```sh
+.venv/bin/python scripts/corner_prune.py cross [--splits 5]                 # calibrate on other designs
+.venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]  # calibrate on k runs of the held-out design
+    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--designs aes,ibex,...]
+```
+
+Anchors are `fast_cb` and `slow_rcw`; g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. Per-split results go to `work/prune/<mode>[_launch].csv`.
 
 ## Layout
 
@@ -83,6 +93,7 @@ Per-scene results go to `work/corners/<design>_<variant>/`. The `slow_nom` scene
 | `scripts/corner_sta.sh`, `scripts/tcl/corner_sta.tcl` | Standalone OpenSTA per (PVT, RC) scene: per-endpoint setup/hold slack and runtime |
 | `scripts/tcl/derate.tcl` | Flat OCV derates for `DERATE=1` corner STA |
 | `scripts/gate1_dominance.py` | Gate 1: worst-scene distribution, physics-rule catch rate, greedy cover |
+| `scripts/corner_prune.py` | Part A: slack predictor, pair-level conformal calibration (cross-design and target-design), leave-one-design-out evaluation |
 | `scripts/tcl/lib/mcmm_util.tcl` | Shared STA helpers |
 | `work/` | ORFS `WORK_HOME`: logs, results, reports (ignored) |
 

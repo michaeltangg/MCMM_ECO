@@ -13,6 +13,8 @@
 #
 # The endpoint CSV has the worst path to every constrained endpoint for setup
 # (max) and hold (min), except endpoints on SRAM macro pins. Times are in ps.
+# start_class is where that path launches: port (top-level input), self (the
+# endpoint's own instance) or reg (any other instance).
 # The JSON summary (endpoints, WNS, TNS) still covers all endpoints.
 
 source [file join [file dirname [info script]] lib mcmm_util.tcl]
@@ -41,6 +43,19 @@ foreach pin [get_pins -quiet -of_objects [get_cells -quiet -hier -filter "ref_na
   dict set ::sram_pins [get_full_name $pin] 1
 }
 
+proc start_class { pe } {
+  set start [[[$pe path] start_path] pin]
+  if { [$start is_top_level_port] } {
+    return port
+  }
+  set end [$pe pin]
+  if { ![$end is_top_level_port]
+       && [get_full_name [$start instance]] eq [get_full_name [$end instance]] } {
+    return self
+  }
+  return reg
+}
+
 # Worst path per endpoint for one check, as CSV rows.
 proc endpoint_rows { min_max check } {
   set rows {}
@@ -51,7 +66,8 @@ proc endpoint_rows { min_max check } {
       continue
     }
     lappend rows [list $end $check \
-      [ps [$pe slack]] [ps [$pe data_arrival_time]] [ps [$pe data_required_time]]]
+      [ps [$pe slack]] [ps [$pe data_arrival_time]] [ps [$pe data_required_time]] \
+      [start_class $pe]]
   }
   return $rows
 }
@@ -61,7 +77,7 @@ set setup_s [timed { lappend rows {*}[endpoint_rows max setup] }]
 set hold_s [timed { lappend rows {*}[endpoint_rows min hold] }]
 
 csv_write "$::env(CORNER_OUT)_endpoints.csv" \
-  {endpoint check slack_ps arrival_ps required_ps} $rows
+  {endpoint check slack_ps arrival_ps required_ps start_class} $rows
 
 set scene [lindex [sta::scenes] 0]
 set f [open "$::env(CORNER_OUT).json" w]
