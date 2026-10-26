@@ -1,6 +1,6 @@
 """Part A: conformal corner pruning, evaluated leave-one-design-out.
 
-    .venv/bin/python scripts/corner_prune.py cross [--splits 5]
+    .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
         [--model lgbm|linear] [--start-class]
@@ -22,7 +22,10 @@ in either check.
 Each design is held out in turn. Models are fit on the other designs.
 
 - cross: the other designs' runs are split at random, by run, into halves;
-  one half fits the models and the other calibrates. --splits draws.
+  one half fits the models and the other calibrates. --splits draws. With
+  --cal-split design, whole designs are split instead (3 of the 7 calibrate,
+  4 fit), so calibration designs are unseen by the models, like the held-out
+  design; each split is a distinct design subset.
 - target: models are fit on all other designs' runs and calibrated on k runs
   of the held-out design; its remaining runs are tested. --splits draws per k.
 
@@ -33,11 +36,12 @@ as register-launched. A class with too few calibration violators for a finite
 threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
-Per-split results go to work/prune/<mode>[_launch][_start][_linear].csv; the summary prints
+Per-split results go to work/prune/<mode>[_dsplit][_launch][_start][_linear].csv; the summary prints
 mean ± std per held-out design.
 """
 
 import argparse
+import itertools
 import math
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -185,17 +189,26 @@ def _init(corners, designs):
 
 def run_cross(design, args):
     test, others = DATA[DATA.design == design], DATA[DATA.design != design]
-    pool = np.sort(others.run.unique())
+    unit = args.cal_split
+    pool = np.sort(others[unit].unique())
+    if unit == "design":
+        subsets = list(itertools.combinations(pool, len(pool) // 2))
+        order = np.random.default_rng(0).permutation(len(subsets))
     rows = []
     for split in range(args.splits):
-        rng = np.random.default_rng(split)
-        cal_runs = rng.choice(pool, len(pool) // 2, replace=False)
-        is_cal = others.run.isin(cal_runs)
+        if unit == "design":
+            cal_units = list(subsets[order[split % len(subsets)]])
+        else:
+            cal_units = np.random.default_rng(split).choice(pool, len(pool) // 2, replace=False)
+        is_cal = others[unit].isin(cal_units)
         cal, tst = fit_predict(others[~is_cal], others[is_cal], test,
                                model=args.model, features=args.features)
         tau, n_cal = calibrate(cal, args.alpha, args.by_launch)
         res = evaluate(tst, tau, args.by_launch)
-        rows.append(summary_row(dict(design=design, split=split, **res), tau, n_cal))
+        row = dict(design=design, split=split, **res)
+        if unit == "design":
+            row["cal_designs"] = " ".join(cal_units)
+        rows.append(summary_row(row, tau, n_cal))
     return rows
 
 
@@ -224,6 +237,8 @@ def main():
     ap.add_argument("--alpha-hold", type=float, default=0.01)
     ap.add_argument("--by-launch", action="store_true",
                     help="calibrate port- and register-launched pairs separately")
+    ap.add_argument("--cal-split", choices=("run", "design"), default="run",
+                    help="cross mode: split other designs' data into fit/cal by run or by design")
     ap.add_argument("--model", choices=("lgbm", "linear"), default="lgbm")
     ap.add_argument("--start-class", action="store_true",
                     help="add each anchor's worst-path start class as features")
@@ -247,7 +262,8 @@ def main():
         rows = [r for rs in ex.map(work, held_out, [args] * len(held_out)) for r in rs]
     res = pd.DataFrame(rows)
 
-    tag = (args.mode + ("_launch" if args.by_launch else "")
+    tag = (args.mode + ("_dsplit" if args.mode == "cross" and args.cal_split == "design" else "")
+           + ("_launch" if args.by_launch else "")
            + ("_start" if args.start_class else "")
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
