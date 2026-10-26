@@ -3,12 +3,16 @@
     .venv/bin/python scripts/corner_prune.py cross [--splits 5]
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
+        [--model lgbm|linear] [--start-class]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
 
 Reads work/<corners>/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
 DERATE=1 scripts/corner_sta.sh. STA runs at the two anchor scenes; for every
-endpoint, check and other scene, a LightGBM model predicts slack from the
-anchors' slack, arrival and required time (F1). A pair violates if its true
+endpoint, check and other scene, a model predicts slack from the anchors'
+slack, arrival and required time (F1): LightGBM, or with --model linear the
+Kahng-style linear regression baseline, both predicting the change from the
+lower anchor slack. --start-class adds whether the worst path launches from a
+port or the endpoint's own instance at each anchor. A pair violates if its true
 slack is below the guard band g. Calibration sets, per check, the threshold
 tau at the conformal quantile of predicted slack over violating calibration
 pairs, so at least 1 - alpha of violating pairs get predicted slack <= tau
@@ -29,7 +33,7 @@ as register-launched. A class with too few calibration violators for a finite
 threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
-Per-split results go to work/prune/<mode>[_launch].csv; the summary prints
+Per-split results go to work/prune/<mode>[_launch][_start][_linear].csv; the summary prints
 mean ± std per held-out design.
 """
 
@@ -42,6 +46,7 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LinearRegression
 
 WORK = Path(os.environ.get("WORK_HOME", Path(__file__).resolve().parents[1] / "work"))
 
@@ -53,6 +58,7 @@ CHECKS = ("setup", "hold")
 GUARD = {"setup": 0.0, "hold": 40.0}
 LAUNCH = ("port", "reg")
 FEATURES = [f"{a}_{c}" for a in ANCHORS for c in ("slack_ps", "arrival_ps", "required_ps")]
+START_FEATURES = [f"{a}_{c}" for a in ANCHORS for c in ("port", "self")]
 
 # Near-critical pairs (true slack within NEAR ps above g) get extra weight.
 NEAR, NEAR_WEIGHT = 50.0, 10.0
@@ -69,6 +75,10 @@ def load_run(path):
     start = d[ANCHORS[0]].start_class.reindex(df.index).where(
         first, d[ANCHORS[1]].start_class.reindex(df.index))
     df["launch"] = start.replace("self", "reg")
+    for a in ANCHORS:
+        cls = d[a].start_class.reindex(df.index)
+        df[f"{a}_port"] = (cls == "port").astype(float)
+        df[f"{a}_self"] = (cls == "self").astype(float)
     for s in TARGETS:
         df[s] = d[s].slack_ps
     return df.dropna().reset_index()
@@ -90,17 +100,18 @@ def load(corners, designs):
     return df
 
 
-def fit_predict(fit, *frames):
+def fit_predict(fit, *frames, model="lgbm", features=FEATURES):
     """Fit one model per check and target scene; add p_<scene> predicted slack to frames."""
     out = [f.copy() for f in frames]
     for check in CHECKS:
         f = fit[fit.check == check]
         for s in TARGETS:
             w = np.where(f[s] < f.g + NEAR, NEAR_WEIGHT, 1.0)
-            m = lgb.LGBMRegressor(**MODEL).fit(f[FEATURES], f[s] - f.base, sample_weight=w)
+            m = lgb.LGBMRegressor(**MODEL) if model == "lgbm" else LinearRegression()
+            m.fit(f[features], f[s] - f.base, sample_weight=w)
             for o in out:
                 rows = o.check == check
-                o.loc[rows, f"p_{s}"] = o.loc[rows, "base"] + m.predict(o.loc[rows, FEATURES])
+                o.loc[rows, f"p_{s}"] = o.loc[rows, "base"] + m.predict(o.loc[rows, features])
     return out
 
 
@@ -180,7 +191,8 @@ def run_cross(design, args):
         rng = np.random.default_rng(split)
         cal_runs = rng.choice(pool, len(pool) // 2, replace=False)
         is_cal = others.run.isin(cal_runs)
-        cal, tst = fit_predict(others[~is_cal], others[is_cal], test)
+        cal, tst = fit_predict(others[~is_cal], others[is_cal], test,
+                               model=args.model, features=args.features)
         tau, n_cal = calibrate(cal, args.alpha, args.by_launch)
         res = evaluate(tst, tau, args.by_launch)
         rows.append(summary_row(dict(design=design, split=split, **res), tau, n_cal))
@@ -189,7 +201,7 @@ def run_cross(design, args):
 
 def run_target(design, args):
     target, others = DATA[DATA.design == design], DATA[DATA.design != design]
-    (target,) = fit_predict(others, target)
+    (target,) = fit_predict(others, target, model=args.model, features=args.features)
     pool = np.sort(target.run.unique())
     rows = []
     for k in args.k:
@@ -212,6 +224,9 @@ def main():
     ap.add_argument("--alpha-hold", type=float, default=0.01)
     ap.add_argument("--by-launch", action="store_true",
                     help="calibrate port- and register-launched pairs separately")
+    ap.add_argument("--model", choices=("lgbm", "linear"), default="lgbm")
+    ap.add_argument("--start-class", action="store_true",
+                    help="add each anchor's worst-path start class as features")
     ap.add_argument("--splits", type=int, help="random draws (default 5 cross, 20 target)")
     ap.add_argument("--k", type=int, nargs="+", default=[1, 2, 3, 5],
                     help="target-design calibration runs (target mode)")
@@ -221,6 +236,7 @@ def main():
     args = ap.parse_args()
     args.alpha = {"setup": args.alpha_setup, "hold": args.alpha_hold}
     args.splits = args.splits or (5 if args.mode == "cross" else 20)
+    args.features = FEATURES + (START_FEATURES if args.start_class else [])
     designs = args.designs.split(",") if args.designs else None
 
     held_out = designs or sorted({p.name.rsplit("_p", 1)[0]
@@ -231,7 +247,10 @@ def main():
         rows = [r for rs in ex.map(work, held_out, [args] * len(held_out)) for r in rs]
     res = pd.DataFrame(rows)
 
-    out = WORK / "prune" / f"{args.mode}{'_launch' if args.by_launch else ''}.csv"
+    tag = (args.mode + ("_launch" if args.by_launch else "")
+           + ("_start" if args.start_class else "")
+           + ("_linear" if args.model == "linear" else ""))
+    out = WORK / "prune" / f"{tag}.csv"
     out.parent.mkdir(exist_ok=True)
     res.to_csv(out, index=False)
 
@@ -240,11 +259,10 @@ def main():
             "pair_setup_port", "pair_hold_port"]
     g = res.groupby(keys)[cols]
     table = ((g.mean() * 100).round(1).astype(str) + " ± "
-             + (g.std() * 100).round(1).astype(str))
+             + (g.std().fillna(0) * 100).round(1).astype(str))
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 20)
-    print(f"{args.mode}{' by launch' if args.by_launch else ''}, "
-          f"alpha setup {args.alpha_setup} hold {args.alpha_hold}, {args.splits} splits")
+    print(f"{tag}, alpha setup {args.alpha_setup} hold {args.alpha_hold}, {args.splits} splits")
     print(table)
     print(f"wrote {out}")
 

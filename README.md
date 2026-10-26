@@ -75,10 +75,10 @@ Part A, conformal corner pruning over the derated scenes, each design held out i
 ```sh
 .venv/bin/python scripts/corner_prune.py cross [--splits 5]                 # calibrate on other designs
 .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]  # calibrate on k runs of the held-out design
-    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--designs aes,ibex,...]
+    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--start-class] [--designs aes,ibex,...]
 ```
 
-Anchors are `fast_cb` and `slow_rcw`; g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. Per-split results go to `work/prune/<mode>[_launch].csv`.
+Anchors are `fast_cb` and `slow_rcw`; g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--start-class` adds each anchor's worst-path start class as features. Per-split results go to `work/prune/<mode>[_launch].csv`.
 
 ## Layout
 
