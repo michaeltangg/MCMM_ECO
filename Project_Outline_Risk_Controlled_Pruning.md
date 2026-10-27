@@ -1,6 +1,6 @@
 # Risk-Controlled Pruning for Timing Closure: Conformal Guarantees for MCMM Corner Reduction and ECO Candidate Filtering
 
-Oct 22, 2026 (updated Oct 23) · @Michael
+Oct 22, 2026 (updated Oct 26) · @Michael
 
 ## Problem
 
@@ -93,11 +93,11 @@ Signoff-style STA over PVT × RC scenes on ASAP7, chosen at Gate 1. The method c
 | Flow | OpenROAD-flow-scripts, standalone OpenSTA per scene | Fully scriptable; every scene timed by phase |
 | PDK | ASAP7 (7nm predictive) | Three PVT corners: SS 0.63 V 100 C, TT 0.70 V 25 C, FF 0.77 V 0 C |
 | Scenes | 3 PVT × 4 RC = 12 | RC corners `cw`, `rcw`, `cb`, `rcb` built by scaling R and C of one extracted SPEF |
-| Derates | Flat OCV derates: cells ±5%, nets ±3%, early/late, same at every scene | Textbook values, not tuned. CRPR on (OpenSTA default). No per-corner derates and no clock uncertainty (a flat uncertainty only shifts g) |
+| Derates | Cells ±5.8% / ±5.0% / ±4.4% at SS / TT / FF; nets ±3% at every scene, early/late. Results to date use flat ±5% cells | Cell derates scaled from ±5% at TT by the gate-overdrive ratio (0.70 − V_th)/(V_DD − V_th), alpha-power law, ASAP7 RVT V_th = 0.17 V (every design uses RVT cells only). Nets flat: supply voltage changes gate delay, not wire delay; per-layer wire variation is in the RC corners. CRPR on (OpenSTA default). No clock uncertainty (a flat uncertainty only shifts g). Rationale and sources in references.md |
 | Guard bands | g_setup = 0, g_hold = 40 ps | Literature puts post-route hold margin at 20–40 ps and signoff remainder at about 5 ps. Derates cover about 10 ps of that; g covers the unmodelled rest (crosstalk, uncertainty, extraction) |
 | Stage | Post-route, extracted SPEF from the ORFS final stage | Signoff-like; scaled RC corners approximate multi-corner extraction (limitation) |
-| Designs | aes, dynamic_node, ibex, jpeg; riscv32i, ethmac optional | Every design is held out in turn |
-| Data variety | 37 runs: 6–7 clock targets per design plus utilization variants | Global placement has no seed; utilization variants stand in for seeds |
+| Designs | aes, dynamic_node, ibex, jpeg, riscv32i, ethmac, cva6, swerv_wrapper | Every design is held out in turn; SRAM-pin endpoints dropped in the macro designs |
+| Data variety | 61 runs, 4–11 per design: clock targets plus utilization variants | Global placement has no seed; utilization variants stand in for seeds |
 | Anchors | `fast_cb` + `slow_rcw` | `slow_rcw` is the setup physics corner; `fast_cb` (not `fast_rcb`) is the usual hold-worst scene |
 | Evaluation | Leave-one-design-out; target-design calibration with k ∈ {1, 2, 3, 5} runs, 20 random splits | Cross-design and within-design calibration measured separately |
 | ECO fixer (Part B) | Own greedy fixer, resize moves via `replace_cell` | Same fixer for pruned and unpruned runs |
@@ -106,17 +106,28 @@ Signoff-style STA over PVT × RC scenes on ASAP7, chosen at Gate 1. The method c
 
 ## Step-by-step breakdown
 
-Eight days, with go/no-go gates before any modeling and before starting Part B.
+Nine days, Oct 22–30, with go/no-go gates before any modeling and before starting Part B. Status as of Oct 26.
 
-1. **Flow bring-up (Oct 22). Done.** aes, dynamic_node, ibex and jpeg on ASAP7 at calibrated clock targets.
+1. **Flow bring-up (Oct 22–24). Done.** aes, dynamic_node, ibex and jpeg on ASAP7 at calibrated clock targets; riscv32i and ethmac added Oct 23, cva6 and swerv_wrapper (with SRAM macros) Oct 24.
 2. **Gate 1: is there anything to prune? (Oct 22). Passed.** With derates and g_hold = 40, the hold physics rule (`fast_rcb`) catches 14 of 635 violating endpoints in aes and 0 of 213 in dynamic_node. Setup's worst scene is always one of two slow scenes, but 34–45% of setup violations sit in other scenes.
-3. **Dataset generation (Oct 23). Done.** 37 runs × 12 derated scenes, per-endpoint setup and hold slack, runtime per phase.
-4. **Models and calibration (Oct 24).** Move the prototype into repo scripts: predictor, pair-level calibration, both calibration modes, baselines.
-5. **Evaluation (Oct 25).** α sweep per check on the combined run set; target-design calibration vs k; miss analysis by startpoint class; main trade-off figure.
-6. **Gate 2: start Part B? (Oct 26).** Only if Part A results and figures are complete. Part A has grown, so Part B is likely to be a short preliminary section.
-7. **Part B (Oct 26–27).** Greedy fixer, candidate enumeration with STA-measured gains, conformal set pruning, coverage across repair iterations.
-8. **Ablations and figures (Oct 28).** F2 vs F1, one vs two anchors, guard band g, calibration-set size.
-9. **Writeup (Oct 29–30).** Final document and slides; deadline Oct 30, 11:59 PM.
+3. **Dataset generation (Oct 23–25). Done.** 61 runs over eight designs × 12 derated scenes, per-endpoint setup and hold slack with the worst path's startpoint class, runtime per phase.
+4. **Models and calibration (Oct 24–25). Done.** `scripts/corner_prune.py`: LightGBM and linear predictors, pair-level calibration per check, cross-design calibration (split by run or by design) and target-design calibration, per-launch-class (Mondrian) calibration and start-class features as options.
+5. **Evaluation (Oct 25–26). In progress.** Done: cross-design and target-design (k ∈ {1, 2, 3, 5}) results on all eight designs, LightGBM vs linear, pair recall by launch class. Left:
+   - baselines in the repo script: physics rule, dominant-scene heuristic (cross-design and same-design history), point predictor + fixed margin;
+   - α sweep per check;
+   - net runtime accounting (anchors, inference, calibration);
+   - LightGBM vs linear: linear matches or beats the untuned LightGBM when calibration designs are unseen by the models. Tune LightGBM on the fit designs only, or make linear the default;
+   - main trade-off figure.
+6. **Re-time with layer-dependent RC corners and corner-dependent derates (Oct 26–28).** Both change the per-scene STA inputs, so every run is re-timed once (about 25 min). About 2 days.
+   - **RC corners:** per-corner OpenRCX rules files written from the stock ASAP7 `rcx_patterns.rules` with per-layer, per-type factors (thin lower metals vary more; coupling and ground C move differently), extracted from `6_final.odb` behind `RCX_CORNERS=1` in `scripts/corner_sta.sh` so the scaled corners stay reproducible. Checks: nominal re-extraction matches `6_final.spef`, WNS ordering across corners is plausible, cross-corner slack is less linear (linear-model RMSE before and after). Main risk: justifying the per-layer factors.
+   - **Derates:** per PVT corner (larger at SS 0.63 V, smaller at FF 0.77 V) in `scripts/tcl/derate.tcl`, with the rationale recorded.
+   - Rerun `corner_prune.py` cross and target with both models; check whether dominant scenes, ceilings and the anchor choice change.
+7. **Miss analysis in STA terms (Oct 28).** For missed pairs (violating, not flagged) and wasted pairs (flagged in clean scenes), break the worst path into input delay, data-path delay, launch and capture clock latency, CRPR credit and setup/hold time at each anchor and the target scene, with OpenSTA queries kept out of the timed scene run. Tie port-launched hold misses to the fixed input delay against growing slow-corner capture latency. One figure by startpoint class and corner. About half a day.
+8. **Ablations and figures (Oct 28).** F2 vs F1, one vs two anchors, guard band g, calibration-set size, near-critical weighting.
+   - **Near-critical weighting:** weight 1 vs 10 on pairs within 50 ps of g, LightGBM and linear, cross (`--cal-split design`) and target modes, compared on scenes skipped at equal α with pair recall checked against 1−α. The weight is untuned and has no literature source, so this is its justification. If weight 1 does as well, drop the weighting. Needs a `--near-weight` flag in `corner_prune.py`; run with the step 6 rerun batch so it runs only once.
+9. **Writeup (Oct 29–30).** Final document and slides; update results, the RC-corner and derate rows of the setup table, and the limitations from the re-timed data. Deadline Oct 30, 11:59 PM.
+
+Steps 5 and 7–9 hold about 3.5 days of work in 3. If the re-extraction slips past Oct 27, the scaled-RC results stay the main result and re-extraction is reported as a check on the designs it finished.
 
 ## Baselines and comparison metrics
 
@@ -172,7 +183,8 @@ Prototype scripts live outside the repo; numbers below are from derated STA, g_s
 
 **Limitations to state up front:**
 
-- ASAP7 is predictive with only three PVT corners and no LVF/POCV data, so flat derates only.
+- ASAP7 is predictive with only three PVT corners and no LVF/POCV data, so derates are textbook values, not foundry tables.
+- Per-corner derates are scaled from a textbook TT value by an overdrive model of V_th-driven variation only. Variation that does not scale with overdrive (gate length, intra-cell parasitics) would make the true voltage dependence weaker, so the SS/FF spread is an upper bound on the voltage effect. Temperature lowers V_th at SS 100 C, which partly offsets the process shift. Foundry derate tables bundle more than V_th variation and do not always follow voltage monotonically.
 - RC corners are approximated by scaling R and C from one extraction, not by separate extraction rule decks, which makes cross-corner prediction close to linear.
 - Non-trivial hold dominance comes mainly from ORFS's I/O constraint template (input delay = 20% of the clock period) combined with derates. It is real STA behaviour, but is presented as I/O-launched hold paths, not temperature inversion.
 - The guarantee is marginal (average over pairs), not per-path. It assumes exchangeability, which holds across runs rather than across pairs within a run, and breaks across designs.
