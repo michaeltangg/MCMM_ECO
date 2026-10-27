@@ -66,10 +66,14 @@ scripts/corner_sta.sh <design> <variant>                # 3 PVT x 4 RC scenes, e
 RC_CORNERS="nom cw rcw cb rcb" scripts/corner_sta.sh ...  # also unscaled RC
 DERATE=1 scripts/corner_sta.sh <design> <variant>       # flat OCV derates
 DERATE=pvt scripts/corner_sta.sh <design> <variant>     # cell derates per PVT corner
+DERATE=pvt RCX_CORNERS=1 scripts/corner_sta.sh ...       # plus OpenRCX RC corners
+caffeinate -i scripts/retime.sh > work/logs/retime.log 2>&1 &  # re-time every run that way, then prune
 .venv/bin/python scripts/gate1_dominance.py <design>_<variant> [--guard 50] [--corners corners_derate]
 ```
 
 Per-scene results go to `work/corners/<design>_<variant>/`. Each endpoint CSV row has the worst setup or hold path's slack, arrival and required time, and `start_class`: whether it launches from an input port, the endpoint's own instance (`self`) or another instance (`reg`). The `slow_nom` scene reproduces ORFS's slow-corner WNS/TNS exactly. With `DERATE=1`, the flat OCV derates in [scripts/tcl/derate.tcl](scripts/tcl/derate.tcl) (cells ±5%, nets ±3%, same at every scene) are applied and results go to `work/corners_derate/<design>_<variant>/` instead. With `DERATE=pvt`, the same file scales the cell derate by PVT corner (±5.8% / ±5.0% / ±4.4% at SS / TT / FF, nets ±3% at every scene) and results go to `work/corners_derate_pvt/<design>_<variant>/`.
+
+With `RCX_CORNERS=1`, each RC corner is a separate OpenRCX extraction from `6_final.odb` (`6_final_rcx_<rc>.spef`, built by [scripts/rcx_spef.sh](scripts/rcx_spef.sh) when missing or stale) instead of a scaled copy of `6_final.spef`, and `_rcx` is added to the results directory (`work/corners_derate_pvt_rcx/` with `DERATE=pvt`). The per-corner rules files in `work/rcx/` come from [scripts/rcx_corner_rules.py](scripts/rcx_corner_rules.py), which scales ASAP7's stock `rcx_patterns.rules` per metal layer with a geometric ±3σ model: line width ±2.7 nm on every layer (so thin lower metals vary more), thickness ±10%, dielectric height ±5%. Coupling and ground C move differently. Sources are in [references.md](references.md). [scripts/retime.sh](scripts/retime.sh) re-times all runs with `DERATE=pvt RCX_CORNERS=1` (extraction six runs at a time, then STA) and reruns `corner_prune.py` into `work/prune/corners_derate_pvt_rcx/`: about 35 minutes of extraction and STA for 61 runs, plus about 35 of pruning.
 
 Part A, conformal corner pruning over the derated scenes, each design held out in turn:
 
@@ -77,11 +81,11 @@ Part A, conformal corner pruning over the derated scenes, each design held out i
 .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]  # calibrate on other designs
 .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]  # calibrate on k runs of the held-out design
     [--fit-runs 0 1 2] [--fit-weight 1]  # move f of the k runs into the fit set
-    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--start-class]
+    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--lgbm KEY=VALUE ...] [--start-class]
     [--anchors fast_cb slow_rcw] [--designs aes,ibex,...]
 ```
 
-Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (`fast_cb slow_cw` for the OpenRCX corners, where `slow_cw` is the worst setup scene); g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--start-class` adds each anchor's worst-path start class as features. Per-split results go to `work/prune/<mode>[_launch].csv`.
+Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (`fast_cb slow_cw` for the OpenRCX corners, where `slow_cw` is the worst setup scene); g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--lgbm` overrides LightGBM parameters (e.g. `num_leaves=63 n_estimators=1000`); `--start-class` adds each anchor's worst-path start class as features. Per-split results go to `work/prune/<mode>[...].csv`, with every non-default option tagged in the name (the full pattern is in the script's docstring), under `work/prune/<corners>/` for any `--corners` other than `corners_derate`.
 
 ## Layout
 
@@ -93,6 +97,9 @@ Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (
 | `scripts/run_flow.sh` | Flow wrapper |
 | `scripts/tcl/check_mcmm.tcl` | Per-corner timing summary |
 | `scripts/scale_spef.py` | Scaled RC-corner SPEFs (`cw`, `rcw`, `cb`, `rcb`) from `6_final.spef` |
+| `scripts/rcx_corner_rules.py` | Per-RC-corner OpenRCX rules files with per-layer R, coupling C and ground C factors |
+| `scripts/rcx_spef.sh`, `scripts/tcl/rcx_extract.tcl` | OpenRCX extraction of every RC corner from `6_final.odb` in one openroad session (`RCX_CORNERS=1`) |
+| `scripts/retime.sh` | Unattended re-time of every run with `DERATE=pvt RCX_CORNERS=1`, then the Part A reruns |
 | `scripts/corner_sta.sh`, `scripts/tcl/corner_sta.tcl` | Standalone OpenSTA per (PVT, RC) scene: per-endpoint setup/hold slack and runtime |
 | `scripts/tcl/derate.tcl` | OCV derates for corner STA: flat (`DERATE=1`) or cell derate per PVT corner (`DERATE=pvt`) |
 | `scripts/gate1_dominance.py` | Gate 1: worst-scene distribution, physics-rule catch rate, greedy cover |
@@ -104,7 +111,7 @@ Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (
 
 - OpenSTA 3.0 calls corners "scenes". Use `sta::find_scene slow`, `sta::worst_slack_scene <scene> max|min`, `sta::total_negative_slack_scene_cmd`, and `report_checks -scenes <name>`. Values from the `sta::` functions are in seconds.
 - `sta::endpoint_violation_count` ignores the active scene. Count violators per corner with `report_checks -scenes`.
-- ORFS extracts one SPEF (`6_final.spef`) at a single process corner. RC corners are to be built by scaling R and C from it.
+- ORFS extracts one SPEF (`6_final.spef`) at a single process corner. RC corners are built either by scaling R and C from it (`scale_spef.py`) or by re-extracting with per-corner OpenRCX rules (`RCX_CORNERS=1`). A nominal re-extraction from `6_final.odb` with the stock rules matches `6_final.spef` exactly apart from the date line.
 
 Deviations from stock ORFS configs, to disclose:
 

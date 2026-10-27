@@ -8,8 +8,11 @@
 # Runs are the <design>_<variant> directories in work/corners_derate/. Stages:
 # per-corner rules, extraction (EXTRACT_JOBS runs at once, default 6),
 # corner_sta.sh one run at a time (JOBS scenes at once, default 6), then
-# corner_prune.py cross and target with both models into
-# work/prune/corners_derate_pvt_rcx/. Pruning is skipped if any run failed.
+# corner_prune.py cross and target with both models and anchors fast_cb
+# slow_cw (slow_cw is the worst setup scene with OpenRCX corners) into
+# work/prune/corners_derate_pvt_rcx/. A failed extraction is only a warning,
+# because corner_sta.sh re-extracts stale corners; pruning is skipped if any
+# run fails STA.
 set -uo pipefail
 
 if [[ -z "${PROJECT_ROOT:-}" ]]; then
@@ -36,7 +39,8 @@ python -I scripts/rcx_corner_rules.py "$WORK_HOME/rcx" > /dev/null || exit 1
 echo "$(stamp) extraction: ${#runs[@]} runs, ${EXTRACT_JOBS:-6} at once"
 for run in "${runs[@]}"; do
   split_run "$run"
-done | xargs -P "${EXTRACT_JOBS:-6}" -n 2 scripts/rcx_spef.sh || failed=1
+done | xargs -P "${EXTRACT_JOBS:-6}" -n 2 scripts/rcx_spef.sh ||
+  echo "$(stamp) extraction failures above; corner_sta.sh retries them"
 
 echo "$(stamp) sta"
 for run in "${runs[@]}"; do
@@ -53,7 +57,8 @@ for args in "cross" "cross --model linear" \
             "cross --cal-split design" "cross --cal-split design --model linear" \
             "target" "target --model linear"; do
   echo "$(stamp) corner_prune $args"
-  .venv/bin/python scripts/corner_prune.py $args --corners $corners || failed=1
+  .venv/bin/python scripts/corner_prune.py $args --corners $corners \
+    --anchors fast_cb slow_cw || failed=1
 done
 echo "$(stamp) done"
 exit $failed
