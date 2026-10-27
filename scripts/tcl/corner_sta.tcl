@@ -10,6 +10,8 @@
 #   CORNER_TOP      top module
 #   CORNER_OUT      output prefix: writes <prefix>_endpoints.csv, <prefix>.json
 #   CORNER_DERATE   optional Tcl file of timing derates, sourced after the SDC
+#   CORNER_DERATE_PVT  optional PVT corner (slow, typical, fast) for per-corner
+#                   cell derates in derate.tcl; flat derates if unset or empty
 #
 # The endpoint CSV has the worst path to every constrained endpoint for setup
 # (max) and hold (min), except endpoints on SRAM macro pins. Times are in ps.
@@ -84,6 +86,7 @@ set f [open "$::env(CORNER_OUT).json" w]
 puts $f [json_obj [list \
   spef "\"$::env(CORNER_SPEF)\"" \
   derate "\"$derate\"" \
+  derate_pvt "\"[expr { [info exists ::env(CORNER_DERATE_PVT)] ? $::env(CORNER_DERATE_PVT) : "" }]\"" \
   endpoints [llength [sta::endpoints]] \
   setup_wns [ps [sta::worst_slack_scene $scene max]] \
   setup_tns [ps [sta::total_negative_slack_scene_cmd $scene max]] \
