@@ -4,7 +4,7 @@
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--fit-runs 0 1 2] [--fit-weight 1]
         [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
-        [--model lgbm|linear] [--start-class] [--anchors fast_cb slow_rcw]
+        [--model lgbm|linear] [--lgbm KEY=VALUE ...] [--start-class] [--anchors fast_cb slow_rcw]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
 
 Reads work/<corners>/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
@@ -12,7 +12,8 @@ DERATE=1 scripts/corner_sta.sh. STA runs at the two anchor scenes; for every
 endpoint, check and other scene, a model predicts slack from the anchors'
 slack, arrival and required time (F1): LightGBM, or with --model linear the
 Kahng-style linear regression baseline, both predicting the change from the
-lower anchor slack. --start-class adds whether the worst path launches from a
+lower anchor slack. --lgbm overrides LightGBM parameters (for example
+num_leaves=63 n_estimators=1000). --start-class adds whether the worst path launches from a
 port or the endpoint's own instance at each anchor. --anchors picks the two
 anchor scenes (default fast_cb slow_rcw). A pair violates if its true
 slack is below the guard band g. Calibration sets, per check, the threshold
@@ -43,8 +44,8 @@ threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
 Per-split results go to
-work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_linear].csv
-(anchors tagged only if not the default), under
+work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_<key><value>...][_linear].csv
+(anchors tagged only if not the default; one _<key><value> per --lgbm override), under
 work/prune/<corners>/ for any --corners other than corners_derate; the summary prints
 mean ± std per held-out design.
 """
@@ -114,14 +115,14 @@ def load(corners, designs):
     return df
 
 
-def fit_predict(fit, *frames, model="lgbm", features=FEATURES):
+def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None):
     """Fit one model per check and target scene; add p_<scene> predicted slack to frames."""
     out = [f.copy() for f in frames]
     for check in CHECKS:
         f = fit[fit.check == check]
         for s in TARGETS:
             w = np.where(f[s] < f.g + NEAR, NEAR_WEIGHT, 1.0) * f.w
-            m = lgb.LGBMRegressor(**MODEL) if model == "lgbm" else LinearRegression()
+            m = lgb.LGBMRegressor(**{**MODEL, **(params or {})}) if model == "lgbm" else LinearRegression()
             m.fit(f[features], f[s] - f.base, sample_weight=w)
             for o in out:
                 rows = o.check == check
@@ -222,8 +223,8 @@ def run_cross(design, args):
         else:
             cal_units = np.random.default_rng(split).choice(pool, len(pool) // 2, replace=False)
         is_cal = others[unit].isin(cal_units)
-        cal, tst = fit_predict(others[~is_cal], others[is_cal], test,
-                               model=args.model, features=args.features)
+        cal, tst = fit_predict(others[~is_cal], others[is_cal], test, model=args.model,
+                               features=args.features, params=args.lgbm)
         tau, n_cal = calibrate(cal, args.alpha, args.by_launch)
         res = evaluate(tst, tau, args.by_launch)
         row = dict(design=design, split=split, **res)
@@ -237,7 +238,8 @@ def run_target(design, args):
     target, others = DATA[DATA.design == design], DATA[DATA.design != design]
     pool = np.sort(target.run.unique())
     if 0 in args.fit_runs:
-        (base,) = fit_predict(others, target, model=args.model, features=args.features)
+        (base,) = fit_predict(others, target, model=args.model, features=args.features,
+                              params=args.lgbm)
     rows = []
     for k, f in itertools.product(args.k, args.fit_runs):
         if k >= len(pool) or f >= k:
@@ -250,7 +252,8 @@ def run_target(design, args):
                 is_fit = target.run.isin(fit_runs)
                 hist = target[is_fit].assign(w=args.fit_weight)
                 (pred,) = fit_predict(pd.concat([others, hist]), target[~is_fit],
-                                      model=args.model, features=args.features)
+                                      model=args.model, features=args.features,
+                                      params=args.lgbm)
             else:
                 pred = base
             is_cal = pred.run.isin(cal_runs)
@@ -271,6 +274,8 @@ def main():
     ap.add_argument("--cal-split", choices=("run", "design"), default="run",
                     help="cross mode: split other designs' data into fit/cal by run or by design")
     ap.add_argument("--model", choices=("lgbm", "linear"), default="lgbm")
+    ap.add_argument("--lgbm", nargs="+", default=[], metavar="KEY=VALUE",
+                    help="LightGBM parameter overrides, e.g. num_leaves=63")
     ap.add_argument("--start-class", action="store_true",
                     help="add each anchor's worst-path start class as features")
     ap.add_argument("--anchors", nargs=2, choices=SCENES, default=list(ANCHORS),
@@ -289,6 +294,13 @@ def main():
     if args.anchors[0] == args.anchors[1]:
         ap.error("--anchors must be two different scenes")
     default_anchors = args.anchors == list(ANCHORS)
+    try:
+        args.lgbm = {k: (float(v) if "." in v or "e" in v else int(v))
+                     for k, v in (kv.split("=", 1) for kv in args.lgbm)}
+    except ValueError:
+        ap.error("--lgbm takes numeric KEY=VALUE pairs")
+    if args.lgbm and args.model != "lgbm":
+        ap.error("--lgbm needs --model lgbm")
     set_anchors(args.anchors)
     args.alpha = {"setup": args.alpha_setup, "hold": args.alpha_hold}
     args.splits = args.splits or (5 if args.mode == "cross" else 20)
@@ -310,6 +322,7 @@ def main():
            + ("_launch" if args.by_launch else "")
            + ("_start" if args.start_class else "")
            + ("" if default_anchors else "_" + "-".join(args.anchors))
+           + "".join(f"_{k}{v:g}" for k, v in args.lgbm.items())
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
     if args.corners != "corners_derate":
