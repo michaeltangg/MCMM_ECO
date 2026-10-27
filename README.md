@@ -76,6 +76,7 @@ Part A, conformal corner pruning over the derated scenes, each design held out i
 ```sh
 .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]  # calibrate on other designs
 .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]  # calibrate on k runs of the held-out design
+    [--fit-runs 0 1 2] [--fit-weight 1]  # move f of the k runs into the fit set
     [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--start-class] [--designs aes,ibex,...]
 ```
 

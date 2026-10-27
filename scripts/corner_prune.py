@@ -2,6 +2,7 @@
 
     .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
+        [--fit-runs 0 1 2] [--fit-weight 1]
         [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
         [--model lgbm|linear] [--start-class]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
@@ -26,8 +27,12 @@ Each design is held out in turn. Models are fit on the other designs.
   --cal-split design, whole designs are split instead (3 of the 7 calibrate,
   4 fit), so calibration designs are unseen by the models, like the held-out
   design; each split is a distinct design subset.
-- target: models are fit on all other designs' runs and calibrated on k runs
-  of the held-out design; its remaining runs are tested. --splits draws per k.
+- target: k full runs of the held-out design are drawn; its remaining runs
+  are tested. Models are fit on all other designs' runs and the k runs
+  calibrate. --splits draws per k. With --fit-runs f > 0, f of the k runs
+  join the fit set instead (their rows weighted by --fit-weight) and the
+  other k - f calibrate, so calibration and test runs are both unseen by the
+  models. At equal k and split, every f draws the same k runs.
 
 --by-launch calibrates port-launched and register-launched pairs separately
 (Mondrian conformal), so the bound holds within each class. The class is the
@@ -36,7 +41,9 @@ as register-launched. A class with too few calibration violators for a finite
 threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
-Per-split results go to work/prune/<mode>[_dsplit][_launch][_start][_linear].csv; the summary prints
+Per-split results go to
+work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_linear].csv, under
+work/prune/<corners>/ for any --corners other than corners_derate; the summary prints
 mean ± std per held-out design.
 """
 
@@ -101,6 +108,7 @@ def load(corners, designs):
         raise SystemExit(f"no runs in {WORK / corners}")
     df = pd.concat(frames, ignore_index=True)
     df["g"] = df.check.map(GUARD)
+    df["w"] = 1.0
     return df
 
 
@@ -110,7 +118,7 @@ def fit_predict(fit, *frames, model="lgbm", features=FEATURES):
     for check in CHECKS:
         f = fit[fit.check == check]
         for s in TARGETS:
-            w = np.where(f[s] < f.g + NEAR, NEAR_WEIGHT, 1.0)
+            w = np.where(f[s] < f.g + NEAR, NEAR_WEIGHT, 1.0) * f.w
             m = lgb.LGBMRegressor(**MODEL) if model == "lgbm" else LinearRegression()
             m.fit(f[features], f[s] - f.base, sample_weight=w)
             for o in out:
@@ -214,19 +222,29 @@ def run_cross(design, args):
 
 def run_target(design, args):
     target, others = DATA[DATA.design == design], DATA[DATA.design != design]
-    (target,) = fit_predict(others, target, model=args.model, features=args.features)
     pool = np.sort(target.run.unique())
+    if 0 in args.fit_runs:
+        (base,) = fit_predict(others, target, model=args.model, features=args.features)
     rows = []
-    for k in args.k:
-        if k >= len(pool):
+    for k, f in itertools.product(args.k, args.fit_runs):
+        if k >= len(pool) or f >= k:
             continue
         for split in range(args.splits):
             rng = np.random.default_rng(split)
-            cal_runs = rng.choice(pool, k, replace=False)
-            is_cal = target.run.isin(cal_runs)
-            tau, n_cal = calibrate(target[is_cal], args.alpha, args.by_launch)
-            res = evaluate(target[~is_cal], tau, args.by_launch)
-            rows.append(summary_row(dict(design=design, k=k, split=split, **res), tau, n_cal))
+            drawn = rng.choice(pool, k, replace=False)
+            fit_runs, cal_runs = drawn[:f], drawn[f:]
+            if f:
+                is_fit = target.run.isin(fit_runs)
+                hist = target[is_fit].assign(w=args.fit_weight)
+                (pred,) = fit_predict(pd.concat([others, hist]), target[~is_fit],
+                                      model=args.model, features=args.features)
+            else:
+                pred = base
+            is_cal = pred.run.isin(cal_runs)
+            tau, n_cal = calibrate(pred[is_cal], args.alpha, args.by_launch)
+            res = evaluate(pred[~is_cal], tau, args.by_launch)
+            row = dict(design=design, k=k, fit=f, split=split, **res)
+            rows.append(summary_row(row, tau, n_cal))
     return rows
 
 
@@ -244,7 +262,11 @@ def main():
                     help="add each anchor's worst-path start class as features")
     ap.add_argument("--splits", type=int, help="random draws (default 5 cross, 20 target)")
     ap.add_argument("--k", type=int, nargs="+", default=[1, 2, 3, 5],
-                    help="target-design calibration runs (target mode)")
+                    help="target-design full runs (target mode)")
+    ap.add_argument("--fit-runs", type=int, nargs="+", default=[0],
+                    help="of the k target-design runs, how many join the fit set (target mode)")
+    ap.add_argument("--fit-weight", type=float, default=1.0,
+                    help="sample weight on target-design fit rows")
     ap.add_argument("--designs", help="comma-separated design pool (default: all)")
     ap.add_argument("--corners", default="corners_derate", help="results dir under work/")
     ap.add_argument("--jobs", type=int, default=6, help="held-out designs run at once")
@@ -262,15 +284,20 @@ def main():
         rows = [r for rs in ex.map(work, held_out, [args] * len(held_out)) for r in rs]
     res = pd.DataFrame(rows)
 
+    fit = args.mode == "target" and max(args.fit_runs) > 0
     tag = (args.mode + ("_dsplit" if args.mode == "cross" and args.cal_split == "design" else "")
+           + ("_fit" if fit else "")
+           + (f"_w{args.fit_weight:g}" if fit and args.fit_weight != 1 else "")
            + ("_launch" if args.by_launch else "")
            + ("_start" if args.start_class else "")
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
-    out.parent.mkdir(exist_ok=True)
+    if args.corners != "corners_derate":
+        out = WORK / "prune" / args.corners / f"{tag}.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
 
-    keys = ["design"] + (["k"] if args.mode == "target" else [])
+    keys = ["design"] + (["k", "fit"] if args.mode == "target" else [])
     cols = ["skipped", "ceiling", "viol_setup", "viol_hold", "pair_setup", "pair_hold",
             "pair_setup_port", "pair_hold_port"]
     g = res.groupby(keys)[cols]
