@@ -77,10 +77,11 @@ Part A, conformal corner pruning over the derated scenes, each design held out i
 .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]  # calibrate on other designs
 .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]  # calibrate on k runs of the held-out design
     [--fit-runs 0 1 2] [--fit-weight 1]  # move f of the k runs into the fit set
-    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--start-class] [--designs aes,ibex,...]
+    [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch] [--model lgbm|linear] [--start-class]
+    [--anchors fast_cb slow_rcw] [--designs aes,ibex,...]
 ```
 
-Anchors are `fast_cb` and `slow_rcw`; g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--start-class` adds each anchor's worst-path start class as features. Per-split results go to `work/prune/<mode>[_launch].csv`.
+Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (`fast_cb slow_cw` for the OpenRCX corners, where `slow_cw` is the worst setup scene); g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--start-class` adds each anchor's worst-path start class as features. Per-split results go to `work/prune/<mode>[_launch].csv`.
 
 ## Layout
 

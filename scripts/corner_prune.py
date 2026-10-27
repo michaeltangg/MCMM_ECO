@@ -4,7 +4,7 @@
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--fit-runs 0 1 2] [--fit-weight 1]
         [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
-        [--model lgbm|linear] [--start-class]
+        [--model lgbm|linear] [--start-class] [--anchors fast_cb slow_rcw]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
 
 Reads work/<corners>/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
@@ -13,7 +13,8 @@ endpoint, check and other scene, a model predicts slack from the anchors'
 slack, arrival and required time (F1): LightGBM, or with --model linear the
 Kahng-style linear regression baseline, both predicting the change from the
 lower anchor slack. --start-class adds whether the worst path launches from a
-port or the endpoint's own instance at each anchor. A pair violates if its true
+port or the endpoint's own instance at each anchor. --anchors picks the two
+anchor scenes (default fast_cb slow_rcw). A pair violates if its true
 slack is below the guard band g. Calibration sets, per check, the threshold
 tau at the conformal quantile of predicted slack over violating calibration
 pairs, so at least 1 - alpha of violating pairs get predicted slack <= tau
@@ -42,7 +43,8 @@ threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
 Per-split results go to
-work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_linear].csv, under
+work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_linear].csv
+(anchors tagged only if not the default), under
 work/prune/<corners>/ for any --corners other than corners_derate; the summary prints
 mean ± std per held-out design.
 """
@@ -190,8 +192,19 @@ def summary_row(res, tau, n_cal):
 DATA = None
 
 
-def _init(corners, designs):
+def set_anchors(anchors):
+    """Rebind the anchor-dependent module constants (each worker process too)."""
+    global ANCHORS, TARGETS, PRED, FEATURES, START_FEATURES
+    ANCHORS = tuple(anchors)
+    TARGETS = [s for s in SCENES if s not in ANCHORS]
+    PRED = [f"p_{s}" for s in TARGETS]
+    FEATURES = [f"{a}_{c}" for a in ANCHORS for c in ("slack_ps", "arrival_ps", "required_ps")]
+    START_FEATURES = [f"{a}_{c}" for a in ANCHORS for c in ("port", "self")]
+
+
+def _init(corners, designs, anchors):
     global DATA
+    set_anchors(anchors)
     DATA = load(corners, designs)
 
 
@@ -260,6 +273,8 @@ def main():
     ap.add_argument("--model", choices=("lgbm", "linear"), default="lgbm")
     ap.add_argument("--start-class", action="store_true",
                     help="add each anchor's worst-path start class as features")
+    ap.add_argument("--anchors", nargs=2, choices=SCENES, default=list(ANCHORS),
+                    metavar="SCENE", help="the two anchor scenes (default fast_cb slow_rcw)")
     ap.add_argument("--splits", type=int, help="random draws (default 5 cross, 20 target)")
     ap.add_argument("--k", type=int, nargs="+", default=[1, 2, 3, 5],
                     help="target-design full runs (target mode)")
@@ -271,6 +286,10 @@ def main():
     ap.add_argument("--corners", default="corners_derate", help="results dir under work/")
     ap.add_argument("--jobs", type=int, default=6, help="held-out designs run at once")
     args = ap.parse_args()
+    if args.anchors[0] == args.anchors[1]:
+        ap.error("--anchors must be two different scenes")
+    default_anchors = args.anchors == list(ANCHORS)
+    set_anchors(args.anchors)
     args.alpha = {"setup": args.alpha_setup, "hold": args.alpha_hold}
     args.splits = args.splits or (5 if args.mode == "cross" else 20)
     args.features = FEATURES + (START_FEATURES if args.start_class else [])
@@ -280,7 +299,7 @@ def main():
                                   for p in (WORK / args.corners).iterdir()})
     work = run_cross if args.mode == "cross" else run_target
     with ProcessPoolExecutor(min(args.jobs, len(held_out)), initializer=_init,
-                             initargs=(args.corners, designs)) as ex:
+                             initargs=(args.corners, designs, args.anchors)) as ex:
         rows = [r for rs in ex.map(work, held_out, [args] * len(held_out)) for r in rs]
     res = pd.DataFrame(rows)
 
@@ -290,6 +309,7 @@ def main():
            + (f"_w{args.fit_weight:g}" if fit and args.fit_weight != 1 else "")
            + ("_launch" if args.by_launch else "")
            + ("_start" if args.start_class else "")
+           + ("" if default_anchors else "_" + "-".join(args.anchors))
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
     if args.corners != "corners_derate":
