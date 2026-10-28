@@ -3,7 +3,7 @@
     .venv/bin/python scripts/corner_prune.py cross [--splits 5] [--cal-split run|design]
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--fit-runs 0 1 2] [--fit-weight 1]
-        [--alpha-setup 0.01] [--alpha-hold 0.01] [--by-launch]
+        [--alpha-setup 0.01 ...] [--alpha-hold 0.01 ...] [--margins 0 10 ...] [--by-launch]
         [--model lgbm|linear] [--lgbm KEY=VALUE ...] [--start-class] [--anchors fast_cb slow_rcw]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
 
@@ -21,6 +21,19 @@ tau at the conformal quantile of predicted slack over violating calibration
 pairs, so at least 1 - alpha of violating pairs get predicted slack <= tau
 (pair recall). A scene runs if it is an anchor or any of its pairs is flagged
 in either check.
+
+--alpha-setup and --alpha-hold take several values; every combination is
+calibrated and evaluated from the same model fit (the model does not depend
+on alpha). --margins adds the point-predictor baseline: the same predictions
+with a fixed threshold g + margin (ps) instead of the conformal one. Rows carry
+method (conformal or margin) and alpha_setup, alpha_hold or margin.
+
+Compute: each scene costs its measured STA runtime (load, SPEF, update_timing
+and both checks, from the scene JSON). saved is 1 - (anchors + scenes run +
+model inference) / (all 12 scenes), per test run; saved_ceiling is the same
+for running exactly the anchors and the scenes with violations. fit_s (model
+fit and prediction) and cal_s (calibration) are one-time costs per split, not
+per run.
 
 Each design is held out in turn. Models are fit on the other designs.
 
@@ -44,16 +57,19 @@ threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
 Per-split results go to
-work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_<key><value>...][_linear].csv
-(anchors tagged only if not the default; one _<key><value> per --lgbm override), under
+work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_<key><value>...][_sweep][_linear].csv
+(anchors tagged only if not the default; one _<key><value> per --lgbm override;
+_sweep if several alphas or any margins), under
 work/prune/<corners>/ for any --corners other than corners_derate; the summary prints
 mean ± std per held-out design.
 """
 
 import argparse
 import itertools
+import json
 import math
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -115,9 +131,24 @@ def load(corners, designs):
     return df
 
 
+def load_runtime(corners):
+    """STA seconds per scene (rows: run, columns: scene) from the scene JSONs."""
+    rt = {}
+    for path in sorted((WORK / corners).iterdir()):
+        rt[path.name] = {}
+        for s in SCENES:
+            j = json.loads((path / f"{s}.json").read_text())
+            rt[path.name][s] = sum(j[k] for k in ("load_s", "spef_s", "update_s", "setup_s", "hold_s"))
+    return pd.DataFrame.from_dict(rt, orient="index")[SCENES]
+
+
 def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None):
-    """Fit one model per check and target scene; add p_<scene> predicted slack to frames."""
-    out = [f.copy() for f in frames]
+    """Fit one model per check and target scene; add p_<scene> predicted slack to frames.
+
+    infer_s spreads each predict call's wall time evenly over its rows, so a
+    run's inference time is the sum over its rows.
+    """
+    out = [f.assign(infer_s=0.0) for f in frames]
     for check in CHECKS:
         f = fit[fit.check == check]
         for s in TARGETS:
@@ -126,7 +157,9 @@ def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None):
             m.fit(f[features], f[s] - f.base, sample_weight=w)
             for o in out:
                 rows = o.check == check
+                t0 = time.perf_counter()
                 o.loc[rows, f"p_{s}"] = o.loc[rows, "base"] + m.predict(o.loc[rows, features])
+                o.loc[rows, "infer_s"] += (time.perf_counter() - t0) / max(rows.sum(), 1)
     return out
 
 
@@ -168,8 +201,16 @@ def evaluate(test, tau, by_launch):
     dirty = pd.DataFrame(viol).groupby(runs).any()
     in_ran = ran.loc[runs].values
 
+    rt = RUNTIME.loc[ran.index]
+    total = rt.sum(axis=1).values
+    anchors = rt[list(ANCHORS)].sum(axis=1).values
+    infer = test.groupby("run").infer_s.sum().loc[ran.index].values
+    used = anchors + (ran.values * rt[TARGETS].values).sum(axis=1) + infer
+    oracle = anchors + (dirty.values * rt[TARGETS].values).sum(axis=1)
     res = dict(skipped=(~ran).values.sum(axis=1).mean() / len(SCENES),
-               ceiling=(~dirty).values.sum(axis=1).mean() / len(SCENES))
+               ceiling=(~dirty).values.sum(axis=1).mean() / len(SCENES),
+               saved=(1 - used / total).mean(), saved_ceiling=(1 - oracle / total).mean(),
+               infer_s=infer.mean())
     for check in CHECKS:
         rows = (test.check == check).values
         v = viol[rows]
@@ -190,7 +231,23 @@ def summary_row(res, tau, n_cal):
     return res
 
 
-DATA = None
+def score(cal, test, args):
+    """One result per alpha combination (conformal) and per fixed margin."""
+    rows = []
+    for a_setup, a_hold in itertools.product(args.alpha_setup, args.alpha_hold):
+        t0 = time.perf_counter()
+        tau, n_cal = calibrate(cal, {"setup": a_setup, "hold": a_hold}, args.by_launch)
+        res = dict(method="conformal", alpha_setup=a_setup, alpha_hold=a_hold,
+                   cal_s=time.perf_counter() - t0, **evaluate(test, tau, args.by_launch))
+        rows.append(summary_row(res, tau, n_cal))
+    for m in args.margins:
+        tau = {(c, g): GUARD[c] + m for c in CHECKS for g in (LAUNCH if args.by_launch else (None,))}
+        res = dict(method="margin", margin=m, **evaluate(test, tau, args.by_launch))
+        rows.append(summary_row(res, tau, dict.fromkeys(tau, np.nan)))
+    return rows
+
+
+DATA = RUNTIME = None
 
 
 def set_anchors(anchors):
@@ -204,9 +261,10 @@ def set_anchors(anchors):
 
 
 def _init(corners, designs, anchors):
-    global DATA
+    global DATA, RUNTIME
     set_anchors(anchors)
     DATA = load(corners, designs)
+    RUNTIME = load_runtime(corners)
 
 
 def run_cross(design, args):
@@ -223,14 +281,15 @@ def run_cross(design, args):
         else:
             cal_units = np.random.default_rng(split).choice(pool, len(pool) // 2, replace=False)
         is_cal = others[unit].isin(cal_units)
+        t0 = time.perf_counter()
         cal, tst = fit_predict(others[~is_cal], others[is_cal], test, model=args.model,
                                features=args.features, params=args.lgbm)
-        tau, n_cal = calibrate(cal, args.alpha, args.by_launch)
-        res = evaluate(tst, tau, args.by_launch)
-        row = dict(design=design, split=split, **res)
-        if unit == "design":
-            row["cal_designs"] = " ".join(cal_units)
-        rows.append(summary_row(row, tau, n_cal))
+        fit_s = time.perf_counter() - t0
+        for res in score(cal, tst, args):
+            row = dict(design=design, split=split, fit_s=fit_s, **res)
+            if unit == "design":
+                row["cal_designs"] = " ".join(cal_units)
+            rows.append(row)
     return rows
 
 
@@ -238,8 +297,10 @@ def run_target(design, args):
     target, others = DATA[DATA.design == design], DATA[DATA.design != design]
     pool = np.sort(target.run.unique())
     if 0 in args.fit_runs:
+        t0 = time.perf_counter()
         (base,) = fit_predict(others, target, model=args.model, features=args.features,
                               params=args.lgbm)
+        base_fit_s = time.perf_counter() - t0
     rows = []
     for k, f in itertools.product(args.k, args.fit_runs):
         if k >= len(pool) or f >= k:
@@ -251,24 +312,26 @@ def run_target(design, args):
             if f:
                 is_fit = target.run.isin(fit_runs)
                 hist = target[is_fit].assign(w=args.fit_weight)
+                t0 = time.perf_counter()
                 (pred,) = fit_predict(pd.concat([others, hist]), target[~is_fit],
                                       model=args.model, features=args.features,
                                       params=args.lgbm)
+                fit_s = time.perf_counter() - t0
             else:
-                pred = base
+                pred, fit_s = base, base_fit_s
             is_cal = pred.run.isin(cal_runs)
-            tau, n_cal = calibrate(pred[is_cal], args.alpha, args.by_launch)
-            res = evaluate(pred[~is_cal], tau, args.by_launch)
-            row = dict(design=design, k=k, fit=f, split=split, **res)
-            rows.append(summary_row(row, tau, n_cal))
+            for res in score(pred[is_cal], pred[~is_cal], args):
+                rows.append(dict(design=design, k=k, fit=f, split=split, fit_s=fit_s, **res))
     return rows
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("mode", choices=("cross", "target"))
-    ap.add_argument("--alpha-setup", type=float, default=0.01)
-    ap.add_argument("--alpha-hold", type=float, default=0.01)
+    ap.add_argument("--alpha-setup", type=float, nargs="+", default=[0.01])
+    ap.add_argument("--alpha-hold", type=float, nargs="+", default=[0.01])
+    ap.add_argument("--margins", type=float, nargs="+", default=[],
+                    help="fixed-margin baseline: flag predicted slack <= g + margin (ps)")
     ap.add_argument("--by-launch", action="store_true",
                     help="calibrate port- and register-launched pairs separately")
     ap.add_argument("--cal-split", choices=("run", "design"), default="run",
@@ -302,7 +365,6 @@ def main():
     if args.lgbm and args.model != "lgbm":
         ap.error("--lgbm needs --model lgbm")
     set_anchors(args.anchors)
-    args.alpha = {"setup": args.alpha_setup, "hold": args.alpha_hold}
     args.splits = args.splits or (5 if args.mode == "cross" else 20)
     args.features = FEATURES + (START_FEATURES if args.start_class else [])
     designs = args.designs.split(",") if args.designs else None
@@ -323,6 +385,7 @@ def main():
            + ("_start" if args.start_class else "")
            + ("" if default_anchors else "_" + "-".join(args.anchors))
            + "".join(f"_{k}{v:g}" for k, v in args.lgbm.items())
+           + ("_sweep" if len(args.alpha_setup) > 1 or len(args.alpha_hold) > 1 or args.margins else "")
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
     if args.corners != "corners_derate":
@@ -331,14 +394,17 @@ def main():
     res.to_csv(out, index=False)
 
     keys = ["design"] + (["k", "fit"] if args.mode == "target" else [])
-    cols = ["skipped", "ceiling", "viol_setup", "viol_hold", "pair_setup", "pair_hold",
+    keys += [c for c in ("method", "alpha_setup", "alpha_hold", "margin")
+             if c in res and res[c].nunique(dropna=False) > 1]
+    cols = ["skipped", "ceiling", "saved", "viol_setup", "viol_hold", "pair_setup", "pair_hold",
             "pair_setup_port", "pair_hold_port"]
-    g = res.groupby(keys)[cols]
+    g = res.groupby(keys, dropna=False)[cols]
     table = ((g.mean() * 100).round(1).astype(str) + " ± "
              + (g.std().fillna(0) * 100).round(1).astype(str))
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 20)
-    print(f"{tag}, alpha setup {args.alpha_setup} hold {args.alpha_hold}, {args.splits} splits")
+    print(f"{tag}, alpha setup {args.alpha_setup} hold {args.alpha_hold}, "
+          f"margins {args.margins}, {args.splits} splits")
     print(table)
     print(f"wrote {out}")
 
