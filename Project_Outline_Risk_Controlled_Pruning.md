@@ -112,11 +112,7 @@ Nine days, Oct 22–30, with go/no-go gates before any modeling and before start
 2. **Gate 1: is there anything to prune? (Oct 22). Passed.** With derates and g_hold = 40, the hold physics rule (`fast_rcb`) catches 14 of 635 violating endpoints in aes and 0 of 213 in dynamic_node. Setup's worst scene is always one of two slow scenes, but 34–45% of setup violations sit in other scenes.
 3. **Dataset generation (Oct 23–25). Done.** 61 runs over eight designs × 12 derated scenes, per-endpoint setup and hold slack with the worst path's startpoint class, runtime per phase.
 4. **Models and calibration (Oct 24–25). Done.** `scripts/corner_prune.py`: LightGBM and linear predictors, pair-level calibration per check, cross-design calibration (split by run or by design) and target-design calibration, per-launch-class (Mondrian) calibration and start-class features as options.
-5. **Evaluation (Oct 25–27). In progress.** Done: cross-design and target-design (k ∈ {1, 2, 3, 5}) results on all eight designs, pair recall by launch class, LightGBM vs linear (linear for new designs, LightGBM for target-design calibration) and LightGBM tuning (no gain over defaults). Left:
-   - baselines in the repo script: physics rule, dominant-scene heuristic (cross-design and same-design history), point predictor + fixed margin;
-   - α sweep per check;
-   - net runtime accounting (anchors, inference, calibration);
-   - main trade-off figure.
+5. **Evaluation (Oct 25–27). Done.** Cross-design and target-design (k ∈ {1, 2, 3, 5}) results on all eight designs, pair recall by launch class, LightGBM vs linear (linear for new designs, LightGBM for target-design calibration), LightGBM tuning (no gain over defaults), baselines (`scripts/prune_baselines.py`, `corner_prune.py --margins`), α sweep per check, net runtime accounting and the trade-off figures (`scripts/prune_figure.py`).
 6. **Re-time with layer-dependent RC corners and corner-dependent derates (Oct 26–27). Done.** All 61 runs re-timed overnight with `scripts/retime.sh`. Nominal re-extraction matches `6_final.spef`; ceilings are unchanged; the setup anchor moves to `slow_cw`. The linear-model RMSE check was dropped.
    - **RC corners:** per-corner OpenRCX rules files written from the stock ASAP7 `rcx_patterns.rules` with per-layer, per-type factors (thin lower metals vary more; coupling and ground C move differently), extracted from `6_final.odb` behind `RCX_CORNERS=1` in `scripts/corner_sta.sh` so the scaled corners stay reproducible. Checks: nominal re-extraction matches `6_final.spef`, WNS ordering across corners is plausible, cross-corner slack is less linear (linear-model RMSE before and after). Main risk: justifying the per-layer factors.
    - **Derates:** per PVT corner (larger at SS 0.63 V, smaller at FF 0.77 V) in `scripts/tcl/derate.tcl`, with the rationale recorded.
@@ -133,9 +129,9 @@ Steps 5 and 7–9 hold about 3.5 days of work in 3. If the re-extraction slips p
 **Part A variants:**
 
 1. **Run all scenes:** ground truth and runtime ceiling.
-2. **Physics rule:** `slow_rcw` for setup and `fast_rcb` for hold only.
+2. **Physics rule:** the two anchors only (`slow_cw` for setup, `fast_cb` for hold).
 3. **Dominant-scene heuristic:** keep every scene that was some violating endpoint's worst, learned from other designs (cross-design) or from other runs of the same design (same-design history).
-4. **Point predictor + fixed margin:** same predictor with an empirical margin (Kahng / patent-style). Sweeping the margin traces the same skip-vs-recall curve as sweeping α, so the comparison is whether the chosen point meets its recall target, not skip at equal recall.
+4. **Point predictor + fixed margin:** same predictions with an empirical margin over g for both checks (Kahng / patent-style). Sweeping the margin and sweeping α give different curves, because conformal sets each check's threshold separately and runs every scene when calibration has too few violators for the bound. The comparison is whether a chosen point meets its recall target and how sensitive savings are to choosing it.
 5. **Conformal pruner (proposed):** same predictor, conformal threshold per check.
 6. **Oracle ceiling:** skip exactly the scenes with no violations.
 
@@ -154,7 +150,30 @@ Steps 5 and 7–9 hold about 3.5 days of work in 3. If the re-extraction slips p
 | Best-move retention (B) | Fraction of repair steps where the STA-best move survived pruning | The Part B guarantee |
 | STA calls and final WNS/TNS (B) | Incremental timing updates per repair; final timing vs. unpruned fixer | Savings at equal quality |
 
-**Primary claim tested:** for verification runs that need near-complete violation recall, the conformal pruner keeps violation recall ≥ 99% for both checks with a stated bound, and captures 40–84% of the available savings so far (most on aes and dynamic_node, least on jpeg and ibex). The dominance heuristic and the physics rule skip more but miss many violations and cannot be tuned toward full recall. The heuristic is not beaten on endpoint or worst-scene recall, and the writeup says so.
+**Primary claim tested:** for verification runs that need near-complete violation recall, the conformal pruner keeps violation recall ≥ 99% for both checks with a stated bound, and captures 39–77% of the available compute savings on a new design and 28–98% with five past runs (re-timed data, α = 1%). The dominance heuristic and the physics rule skip more but miss many violations and cannot be tuned toward full recall. The heuristic is not beaten on endpoint or worst-scene recall, and the writeup says so.
+
+## Results on the re-timed data (Oct 27)
+
+Per-PVT derates, OpenRCX RC corners, anchors `fast_cb` + `slow_cw`, g_setup = 0, g_hold = 40, α = 1% per check unless stated. "New design" is cross-design calibration split by design with the linear model (5 splits); "with history" is target-design calibration on k = 5 runs with LightGBM (20 splits, the six designs with more than five runs). Compute saved is net of the anchors and model inference, from measured per-scene STA runtimes. Figures: `work/figures/tradeoff.png`, `threshold.png`.
+
+- **Pruner vs heuristics:**
+
+  | Method | Compute saved | Violations caught (setup / hold) |
+  | --- | --- | --- |
+  | Conformal pruner, new design | 14% (oracle 22%) | 100 / 100%; worst split 99.8% |
+  | Conformal pruner, with history | 16% (oracle 29%) | 100 / 100% in every split |
+  | Physics rule (anchors only) | 83% | 29–52% / 18–28% |
+  | Dominant scenes, other designs | 50% | 47–57% / 53–100% |
+  | Dominant scenes, past runs of the design | 58–83% | 30–52% / 25–91% |
+
+  The heuristics' extra savings come from skipping scenes with violations: cva6, ethmac and swerv_wrapper have no clean scene, yet the heuristics skip 50–83% of their scenes. They still reach about 100% endpoint recall.
+- **Per design, share of the oracle's savings captured:** new design aes 39%, dynamic_node 71%, ibex 77%, jpeg 55%, riscv32i 77%; with history aes 32%, dynamic_node 28%, ibex 94%, jpeg 79%, riscv32i 98%. cva6, ethmac and swerv_wrapper have nothing to save and the pruner skips nothing.
+- **Pair recall:** with history it averages about 98% (aes 91–92%). On a new design it varies by design (ibex setup 83%, dynamic_node hold 78%), so the bound holds only with target-design calibration.
+- **α sweep:** savings rise from 14 to 20% (new design) and 16 to 21% (with history) between α = 1% and 20%, while violation recall stays ≥ 99.1% in every split. Loosening α_hold moves savings about 5 points; α_setup about 1, because `slow_cw` is the worst setup scene for every endpoint.
+- **Fixed margin:** the same predictions with no margin (flag predicted slack below g) save 17% (new design) and 24% (with history), more than conformal at α = 1%, but a 10 ps margin drops savings to about 5%. Conformal's median hold threshold lands within 2 ps of g; the gap comes from designs whose calibration runs hold too few hold violators for the bound (mostly dynamic_node), where conformal runs every scene and the 0 ps margin prunes and misses violations (99.1% violation recall in its worst split).
+- **Runtime:** a full 12-scene STA takes a median 70 s per run (43–649 s); the two anchors are 17% of it. Inference per run is 0.01% of STA with the linear model and 1.2% with LightGBM (upper bound, measured with six designs in parallel). One-time model fit: 1.2 s linear, about 106 s LightGBM; calibration under 0.1 s.
+- **Anchor choice:** with OpenRCX corners `slow_cw` is the worst setup scene for every near-critical endpoint; keeping `slow_rcw` leaves 79% of violating setup pairs below both anchors and cuts riscv32i's savings with history from 33% to 2%.
+- **LightGBM tuning:** 18 settings (num_leaves, n_estimators, min_child_samples) with nested leave-one-design-out selection give 16.2–17.0% scenes skipped at k = 5, the same as the defaults.
 
 ## Results to date (prototype, Oct 23)
 
