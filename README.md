@@ -85,9 +85,10 @@ Part A, conformal corner pruning over the derated scenes, each design held out i
     [--anchors fast_cb slow_rcw] [--designs aes,ibex,...]
 .venv/bin/python scripts/prune_baselines.py [--corners ...] [--anchors ...]  # physics rule, dominant scenes, oracle
 .venv/bin/python scripts/prune_figure.py    # trade-off figures from the sweeps and baselines
+.venv/bin/python scripts/prune_misses.py    # miss analysis from corner_prune.py --pairs dumps
 ```
 
-Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (`fast_cb slow_cw` for the OpenRCX corners, where `slow_cw` is the worst setup scene); g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--lgbm` overrides LightGBM parameters (e.g. `num_leaves=63 n_estimators=1000`); `--start-class` adds each anchor's worst-path start class as features. Several `--alpha-setup`/`--alpha-hold` values calibrate every combination from one model fit; `--margins` adds the point-predictor baseline (flag predicted slack below g + margin). Every row also has `saved`, the net compute saved per run from the measured per-scene STA runtimes (anchors and model inference included), with model fit and calibration times recorded as one-time costs. Per-split results go to `work/prune/<mode>[...].csv`, with every non-default option tagged in the name (the full pattern is in the script's docstring), under `work/prune/<corners>/` for any `--corners` other than `corners_derate`.
+Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (`fast_cb slow_cw` for the OpenRCX corners, where `slow_cw` is the worst setup scene); g is 0 ps for setup and 40 ps for hold. `--by-launch` calibrates port- and register-launched pairs separately. `--model linear` swaps LightGBM for the linear-regression baseline; `--lgbm` overrides LightGBM parameters (e.g. `num_leaves=63 n_estimators=1000`); `--start-class` adds each anchor's worst-path start class as features. Several `--alpha-setup`/`--alpha-hold` values calibrate every combination from one model fit; `--margins` adds the point-predictor baseline (flag predicted slack below g + margin). Every row also has `saved`, the net compute saved per run from the measured per-scene STA runtimes (anchors and model inference included), with model fit and calibration times recorded as one-time costs. `--pairs` also writes every missed pair and counts of violating, missed and wasted pairs (`<tag>_misses.csv`, `<tag>_pairstats.csv`) for `prune_misses.py`. Per-split results go to `work/prune/<mode>[...].csv`, with every non-default option tagged in the name (the full pattern is in the script's docstring), under `work/prune/<corners>/` for any `--corners` other than `corners_derate`.
 
 ## Layout
 
@@ -108,6 +109,7 @@ Anchors are `fast_cb` and `slow_rcw` unless `--anchors` names two other scenes (
 | `scripts/corner_prune.py` | Part A: slack predictor, pair-level conformal calibration (cross-design and target-design), leave-one-design-out evaluation |
 | `scripts/prune_baselines.py` | Part A baselines on the same runs: physics rule, dominant-scene heuristic (other designs, past runs), oracle |
 | `scripts/prune_figure.py` | Part A figures: compute saved vs violations caught (pruner vs heuristics) and vs pair recall (conformal vs fixed margin), to `work/figures/` |
+| `scripts/prune_misses.py` | Part A miss analysis: missed and wasted pairs by launch class, distance to g, scene and arrival/required shift |
 | `scripts/tcl/lib/mcmm_util.tcl` | Shared STA helpers |
 | `work/` | ORFS `WORK_HOME`: logs, results, reports (ignored) |
 
