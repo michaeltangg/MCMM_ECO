@@ -35,6 +35,12 @@ for running exactly the anchors and the scenes with violations. fit_s (model
 fit and prediction) and cal_s (calibration) are one-time costs per split, not
 per run.
 
+--pairs also writes, for the first alpha combination, <tag>_misses.csv (every
+violating pair not flagged: true and predicted slack, threshold, launch class,
+whether its scene ran) and <tag>_pairstats.csv (counts of violating, missed
+and wasted pairs, wasted meaning flagged in a scene with no violations, by
+check, launch class, scene and slack - g bin), per split.
+
 Each design is held out in turn. Models are fit on the other designs.
 
 - cross: the other designs' runs are split at random, by run, into halves;
@@ -190,7 +196,33 @@ def calibrate(cal, alpha, by_launch):
     return tau, n_cal
 
 
-def evaluate(test, tau, by_launch):
+GAP_BINS = [-np.inf, -50, -20, -10, -5, 0, 5, 10, 20, 50, np.inf]
+
+
+def pair_dump(test, flag, viol, thr, in_ran, dirty_scene):
+    """Missed pairs, and counts of violating, missed and wasted pairs by class."""
+    slack = test[TARGETS].values
+    i, j = np.nonzero(viol & ~flag)
+    misses = pd.DataFrame(dict(run=test.run.values[i], endpoint=test.endpoint.values[i],
+                               check=test.check.values[i], launch=test.launch.values[i],
+                               scene=np.array(TARGETS)[j], slack=slack[i, j],
+                               pred=test[PRED].values[i, j], tau=thr[i], base=test.base.values[i],
+                               ran=in_ran[i, j]))
+    gap_bin = np.digitize(slack - test.g.values[:, None], GAP_BINS[1:-1])
+    frames = []
+    for kind, mask in (("viol", viol), ("miss", viol & ~flag), ("wasted", flag & ~dirty_scene)):
+        i, j = np.nonzero(mask)
+        frames.append(pd.DataFrame(dict(kind=kind, check=test.check.values[i],
+                                        launch=test.launch.values[i], scene=np.array(TARGETS)[j],
+                                        gap_bin=gap_bin[i, j]))
+                      .value_counts().rename("n").reset_index())
+    stats = pd.concat(frames, ignore_index=True)
+    labels = [f"[{lo:g},{hi:g})" for lo, hi in zip(GAP_BINS[:-1], GAP_BINS[1:])]
+    stats["gap_bin"] = stats.gap_bin.map(dict(enumerate(labels)))
+    return misses, stats
+
+
+def evaluate(test, tau, by_launch, pairs=False):
     grp = test.launch if by_launch else [None] * len(test)
     thr = np.array([tau[c, g] for c, g in zip(test.check, grp)])
     flag = test[PRED].values <= thr[:, None]
@@ -221,6 +253,8 @@ def evaluate(test, tau, by_launch):
             vg = v & (test.launch.values[rows] == g)[:, None]
             ng = vg.sum()
             res[f"pair_{check}_{g}"] = (vg & flag[rows]).sum() / ng if ng else np.nan
+    if pairs:
+        return res, pair_dump(test, flag, viol, thr, in_ran, dirty.loc[runs].values)
     return res
 
 
@@ -232,19 +266,23 @@ def summary_row(res, tau, n_cal):
 
 
 def score(cal, test, args):
-    """One result per alpha combination (conformal) and per fixed margin."""
-    rows = []
+    """One result per alpha combination (conformal) and per fixed margin, plus the
+    --pairs dump (misses, stats) of the first alpha combination, or None."""
+    rows, dump = [], None
     for a_setup, a_hold in itertools.product(args.alpha_setup, args.alpha_hold):
         t0 = time.perf_counter()
         tau, n_cal = calibrate(cal, {"setup": a_setup, "hold": a_hold}, args.by_launch)
-        res = dict(method="conformal", alpha_setup=a_setup, alpha_hold=a_hold,
-                   cal_s=time.perf_counter() - t0, **evaluate(test, tau, args.by_launch))
+        cal_s = time.perf_counter() - t0
+        ev = evaluate(test, tau, args.by_launch, pairs=args.pairs and dump is None)
+        if isinstance(ev, tuple):
+            ev, dump = ev
+        res = dict(method="conformal", alpha_setup=a_setup, alpha_hold=a_hold, cal_s=cal_s, **ev)
         rows.append(summary_row(res, tau, n_cal))
     for m in args.margins:
         tau = {(c, g): GUARD[c] + m for c in CHECKS for g in (LAUNCH if args.by_launch else (None,))}
         res = dict(method="margin", margin=m, **evaluate(test, tau, args.by_launch))
         rows.append(summary_row(res, tau, dict.fromkeys(tau, np.nan)))
-    return rows
+    return rows, dump
 
 
 DATA = RUNTIME = None
@@ -274,7 +312,7 @@ def run_cross(design, args):
     if unit == "design":
         subsets = list(itertools.combinations(pool, len(pool) // 2))
         order = np.random.default_rng(0).permutation(len(subsets))
-    rows = []
+    rows, dumps = [], []
     for split in range(args.splits):
         if unit == "design":
             cal_units = list(subsets[order[split % len(subsets)]])
@@ -285,12 +323,15 @@ def run_cross(design, args):
         cal, tst = fit_predict(others[~is_cal], others[is_cal], test, model=args.model,
                                features=args.features, params=args.lgbm)
         fit_s = time.perf_counter() - t0
-        for res in score(cal, tst, args):
+        results, dump = score(cal, tst, args)
+        for res in results:
             row = dict(design=design, split=split, fit_s=fit_s, **res)
             if unit == "design":
                 row["cal_designs"] = " ".join(cal_units)
             rows.append(row)
-    return rows
+        if dump:
+            dumps.append([d.assign(design=design, split=split) for d in dump])
+    return rows, dumps
 
 
 def run_target(design, args):
@@ -301,7 +342,7 @@ def run_target(design, args):
         (base,) = fit_predict(others, target, model=args.model, features=args.features,
                               params=args.lgbm)
         base_fit_s = time.perf_counter() - t0
-    rows = []
+    rows, dumps = [], []
     for k, f in itertools.product(args.k, args.fit_runs):
         if k >= len(pool) or f >= k:
             continue
@@ -320,9 +361,12 @@ def run_target(design, args):
             else:
                 pred, fit_s = base, base_fit_s
             is_cal = pred.run.isin(cal_runs)
-            for res in score(pred[is_cal], pred[~is_cal], args):
-                rows.append(dict(design=design, k=k, fit=f, split=split, fit_s=fit_s, **res))
-    return rows
+            results, dump = score(pred[is_cal], pred[~is_cal], args)
+            rows += [dict(design=design, k=k, fit=f, split=split, fit_s=fit_s, **res)
+                     for res in results]
+            if dump:
+                dumps.append([d.assign(design=design, k=k, fit=f, split=split) for d in dump])
+    return rows, dumps
 
 
 def main():
@@ -350,6 +394,8 @@ def main():
                     help="of the k target-design runs, how many join the fit set (target mode)")
     ap.add_argument("--fit-weight", type=float, default=1.0,
                     help="sample weight on target-design fit rows")
+    ap.add_argument("--pairs", action="store_true",
+                    help="also write missed pairs and violating/missed/wasted pair counts")
     ap.add_argument("--designs", help="comma-separated design pool (default: all)")
     ap.add_argument("--corners", default="corners_derate", help="results dir under work/")
     ap.add_argument("--jobs", type=int, default=6, help="held-out designs run at once")
@@ -374,8 +420,9 @@ def main():
     work = run_cross if args.mode == "cross" else run_target
     with ProcessPoolExecutor(min(args.jobs, len(held_out)), initializer=_init,
                              initargs=(args.corners, designs, args.anchors)) as ex:
-        rows = [r for rs in ex.map(work, held_out, [args] * len(held_out)) for r in rs]
-    res = pd.DataFrame(rows)
+        results = list(ex.map(work, held_out, [args] * len(held_out)))
+    res = pd.DataFrame([r for rows, _ in results for r in rows])
+    dumps = [d for _, ds in results for d in ds]
 
     fit = args.mode == "target" and max(args.fit_runs) > 0
     tag = (args.mode + ("_dsplit" if args.mode == "cross" and args.cal_split == "design" else "")
@@ -392,6 +439,11 @@ def main():
         out = WORK / "prune" / args.corners / f"{tag}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
+    if dumps:
+        for i, name in enumerate(("misses", "pairstats")):
+            path = out.with_name(f"{out.stem}_{name}.csv")
+            pd.concat([d[i] for d in dumps], ignore_index=True).to_csv(path, index=False)
+            print(f"wrote {path}")
 
     keys = ["design"] + (["k", "fit"] if args.mode == "target" else [])
     keys += [c for c in ("method", "alpha_setup", "alpha_hold", "margin")
