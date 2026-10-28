@@ -2,6 +2,7 @@
 
     .venv/bin/python scripts/prune_baselines.py [--corners corners_derate]
         [--anchors fast_cb slow_rcw] [--designs aes,ibex,...]
+        [--guard-setup 0] [--guard-hold 40]
 
 Every method runs the two anchors plus its own scene choice, per test run:
 
@@ -13,7 +14,8 @@ Every method runs the two anchors plus its own scene choice, per test run:
   other designs.
 - oracle: exactly the scenes with violations (the ceiling).
 
-A pair violates if its slack is below the guard band g (corner_prune.GUARD).
+A pair violates if its slack is below the guard band g (--guard-setup,
+--guard-hold; default corner_prune.GUARD, tagged _g<setup>-<hold> otherwise).
 viol_<check> is the share of violating pairs in scenes that run, which is also
 the pair recall since a heuristic flags whole scenes; ep_<check> is the share
 of violating endpoints caught in at least one scene that runs. saved is
@@ -58,9 +60,14 @@ def main():
     ap.add_argument("--anchors", nargs=2, choices=cp.SCENES, default=list(cp.ANCHORS),
                     metavar="SCENE", help="the two anchor scenes (default fast_cb slow_rcw)")
     ap.add_argument("--designs", help="comma-separated design pool (default: all)")
+    ap.add_argument("--guard-setup", type=float, default=cp.GUARD["setup"], help="g for setup (ps)")
+    ap.add_argument("--guard-hold", type=float, default=cp.GUARD["hold"], help="g for hold (ps)")
     args = ap.parse_args()
     default_anchors = args.anchors == list(cp.ANCHORS)
     cp.set_anchors(args.anchors)
+    guard = {"setup": args.guard_setup, "hold": args.guard_hold}
+    default_guard = guard == cp.GUARD
+    cp.GUARD.update(guard)
     designs = args.designs.split(",") if args.designs else None
 
     df = cp.load(args.corners, designs)
@@ -85,7 +92,8 @@ def main():
                              **score_run(d, slack.loc[d.index], keep, runtime.loc[run])))
     res = pd.DataFrame(rows)
 
-    tag = "baselines" + ("" if default_anchors else "_" + "-".join(args.anchors))
+    tag = ("baselines" + ("" if default_anchors else "_" + "-".join(args.anchors))
+           + ("" if default_guard else f"_g{args.guard_setup:g}-{args.guard_hold:g}"))
     out = cp.WORK / "prune" / f"{tag}.csv"
     if args.corners != "corners_derate":
         out = cp.WORK / "prune" / args.corners / f"{tag}.csv"
