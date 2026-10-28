@@ -4,7 +4,8 @@
     .venv/bin/python scripts/corner_prune.py target [--k 1 2 3 5] [--splits 20]
         [--fit-runs 0 1 2] [--fit-weight 1]
         [--alpha-setup 0.01 ...] [--alpha-hold 0.01 ...] [--margins 0 10 ...] [--by-launch]
-        [--model lgbm|linear] [--lgbm KEY=VALUE ...] [--start-class] [--anchors fast_cb slow_rcw]
+        [--model lgbm|linear] [--lgbm KEY=VALUE ...] [--near-weight 10] [--start-class]
+        [--anchors fast_cb slow_rcw] [--guard-setup 0] [--guard-hold 40]
         [--designs aes,ibex,...] [--corners corners_derate] [--jobs 6]
 
 Reads work/<corners>/<design>_<variant>/<pvt>_<rc>_endpoints.csv from
@@ -12,11 +13,13 @@ DERATE=1 scripts/corner_sta.sh. STA runs at the two anchor scenes; for every
 endpoint, check and other scene, a model predicts slack from the anchors'
 slack, arrival and required time (F1): LightGBM, or with --model linear the
 Kahng-style linear regression baseline, both predicting the change from the
-lower anchor slack. --lgbm overrides LightGBM parameters (for example
-num_leaves=63 n_estimators=1000). --start-class adds whether the worst path launches from a
-port or the endpoint's own instance at each anchor. --anchors picks the two
-anchor scenes (default fast_cb slow_rcw). A pair violates if its true
-slack is below the guard band g. Calibration sets, per check, the threshold
+lower anchor slack. Fit rows whose true slack is within 50 ps above g (or
+below it) get --near-weight (default 10). --lgbm overrides LightGBM
+parameters (for example num_leaves=63 n_estimators=1000). --start-class adds whether the worst path launches from a
+port or the endpoint's own instance at each anchor. --anchors picks the anchor
+scenes (default fast_cb slow_rcw; one anchor for the ablation). A pair
+violates if its true slack is below the guard band g (--guard-setup,
+--guard-hold; default 0 and 40 ps). Calibration sets, per check, the threshold
 tau at the conformal quantile of predicted slack over violating calibration
 pairs, so at least 1 - alpha of violating pairs get predicted slack <= tau
 (pair recall). A scene runs if it is an anchor or any of its pairs is flagged
@@ -63,8 +66,9 @@ threshold (fewer than 1/alpha - 1) uses the pooled threshold of its check, so
 the per-class bound holds only for classes that calibrate on their own.
 
 Per-split results go to
-work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_<key><value>...][_sweep][_linear].csv
-(anchors tagged only if not the default; one _<key><value> per --lgbm override;
+work/prune/<mode>[_dsplit][_fit][_w<weight>][_launch][_start][_<a1>-<a2>][_<key><value>...][_nw<weight>][_g<setup>-<hold>][_sweep][_linear].csv
+(anchors and guard bands tagged only if not the default; one _<key><value> per --lgbm override;
+_nw if --near-weight is not 10;
 _sweep if several alphas or any margins), under
 work/prune/<corners>/ for any --corners other than corners_derate; the summary prints
 mean ± std per held-out design.
@@ -106,11 +110,12 @@ def load_run(path):
          for s in SCENES}
     df = pd.concat([d[a][["slack_ps", "arrival_ps", "required_ps"]].add_prefix(f"{a}_")
                     for a in ANCHORS], axis=1)
-    first = df[f"{ANCHORS[0]}_slack_ps"] <= df[f"{ANCHORS[1]}_slack_ps"]
-    df["base"] = df[f"{ANCHORS[0]}_slack_ps"].where(first, df[f"{ANCHORS[1]}_slack_ps"])
-    start = d[ANCHORS[0]].start_class.reindex(df.index).where(
-        first, d[ANCHORS[1]].start_class.reindex(df.index))
-    df["launch"] = start.replace("self", "reg")
+    slack = df[[f"{a}_slack_ps" for a in ANCHORS]].values
+    low = np.argmin(np.nan_to_num(slack, nan=np.inf), axis=1)   # first anchor wins ties
+    rows = np.arange(len(df))
+    df["base"] = slack[rows, low]
+    start = np.column_stack([d[a].start_class.reindex(df.index).values for a in ANCHORS])
+    df["launch"] = pd.Series(start[rows, low], index=df.index).replace("self", "reg")
     for a in ANCHORS:
         cls = d[a].start_class.reindex(df.index)
         df[f"{a}_port"] = (cls == "port").astype(float)
@@ -148,7 +153,8 @@ def load_runtime(corners):
     return pd.DataFrame.from_dict(rt, orient="index")[SCENES]
 
 
-def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None):
+def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None,
+                near_weight=NEAR_WEIGHT):
     """Fit one model per check and target scene; add p_<scene> predicted slack to frames.
 
     infer_s spreads each predict call's wall time evenly over its rows, so a
@@ -158,7 +164,7 @@ def fit_predict(fit, *frames, model="lgbm", features=FEATURES, params=None):
     for check in CHECKS:
         f = fit[fit.check == check]
         for s in TARGETS:
-            w = np.where(f[s] < f.g + NEAR, NEAR_WEIGHT, 1.0) * f.w
+            w = np.where(f[s] < f.g + NEAR, near_weight, 1.0) * f.w
             m = lgb.LGBMRegressor(**{**MODEL, **(params or {})}) if model == "lgbm" else LinearRegression()
             m.fit(f[features], f[s] - f.base, sample_weight=w)
             for o in out:
@@ -298,9 +304,10 @@ def set_anchors(anchors):
     START_FEATURES = [f"{a}_{c}" for a in ANCHORS for c in ("port", "self")]
 
 
-def _init(corners, designs, anchors):
+def _init(corners, designs, anchors, guard):
     global DATA, RUNTIME
     set_anchors(anchors)
+    GUARD.update(guard)
     DATA = load(corners, designs)
     RUNTIME = load_runtime(corners)
 
@@ -321,7 +328,8 @@ def run_cross(design, args):
         is_cal = others[unit].isin(cal_units)
         t0 = time.perf_counter()
         cal, tst = fit_predict(others[~is_cal], others[is_cal], test, model=args.model,
-                               features=args.features, params=args.lgbm)
+                               features=args.features, params=args.lgbm,
+                               near_weight=args.near_weight)
         fit_s = time.perf_counter() - t0
         results, dump = score(cal, tst, args)
         for res in results:
@@ -340,7 +348,7 @@ def run_target(design, args):
     if 0 in args.fit_runs:
         t0 = time.perf_counter()
         (base,) = fit_predict(others, target, model=args.model, features=args.features,
-                              params=args.lgbm)
+                              params=args.lgbm, near_weight=args.near_weight)
         base_fit_s = time.perf_counter() - t0
     rows, dumps = [], []
     for k, f in itertools.product(args.k, args.fit_runs):
@@ -356,7 +364,7 @@ def run_target(design, args):
                 t0 = time.perf_counter()
                 (pred,) = fit_predict(pd.concat([others, hist]), target[~is_fit],
                                       model=args.model, features=args.features,
-                                      params=args.lgbm)
+                                      params=args.lgbm, near_weight=args.near_weight)
                 fit_s = time.perf_counter() - t0
             else:
                 pred, fit_s = base, base_fit_s
@@ -383,10 +391,14 @@ def main():
     ap.add_argument("--model", choices=("lgbm", "linear"), default="lgbm")
     ap.add_argument("--lgbm", nargs="+", default=[], metavar="KEY=VALUE",
                     help="LightGBM parameter overrides, e.g. num_leaves=63")
+    ap.add_argument("--near-weight", type=float, default=NEAR_WEIGHT,
+                    help=f"fit weight on pairs within {NEAR:g} ps above g (default {NEAR_WEIGHT:g})")
     ap.add_argument("--start-class", action="store_true",
                     help="add each anchor's worst-path start class as features")
-    ap.add_argument("--anchors", nargs=2, choices=SCENES, default=list(ANCHORS),
-                    metavar="SCENE", help="the two anchor scenes (default fast_cb slow_rcw)")
+    ap.add_argument("--anchors", nargs="+", choices=SCENES, default=list(ANCHORS),
+                    metavar="SCENE", help="one or two anchor scenes (default fast_cb slow_rcw)")
+    ap.add_argument("--guard-setup", type=float, default=GUARD["setup"], help="g for setup (ps)")
+    ap.add_argument("--guard-hold", type=float, default=GUARD["hold"], help="g for hold (ps)")
     ap.add_argument("--splits", type=int, help="random draws (default 5 cross, 20 target)")
     ap.add_argument("--k", type=int, nargs="+", default=[1, 2, 3, 5],
                     help="target-design full runs (target mode)")
@@ -400,9 +412,12 @@ def main():
     ap.add_argument("--corners", default="corners_derate", help="results dir under work/")
     ap.add_argument("--jobs", type=int, default=6, help="held-out designs run at once")
     args = ap.parse_args()
-    if args.anchors[0] == args.anchors[1]:
-        ap.error("--anchors must be two different scenes")
+    if len(args.anchors) > 2 or len(set(args.anchors)) < len(args.anchors):
+        ap.error("--anchors takes one or two different scenes")
     default_anchors = args.anchors == list(ANCHORS)
+    guard = {"setup": args.guard_setup, "hold": args.guard_hold}
+    default_guard = guard == GUARD
+    GUARD.update(guard)
     try:
         args.lgbm = {k: (float(v) if "." in v or "e" in v else int(v))
                      for k, v in (kv.split("=", 1) for kv in args.lgbm)}
@@ -419,7 +434,7 @@ def main():
                                   for p in (WORK / args.corners).iterdir()})
     work = run_cross if args.mode == "cross" else run_target
     with ProcessPoolExecutor(min(args.jobs, len(held_out)), initializer=_init,
-                             initargs=(args.corners, designs, args.anchors)) as ex:
+                             initargs=(args.corners, designs, args.anchors, guard)) as ex:
         results = list(ex.map(work, held_out, [args] * len(held_out)))
     res = pd.DataFrame([r for rows, _ in results for r in rows])
     dumps = [d for _, ds in results for d in ds]
@@ -432,6 +447,8 @@ def main():
            + ("_start" if args.start_class else "")
            + ("" if default_anchors else "_" + "-".join(args.anchors))
            + "".join(f"_{k}{v:g}" for k, v in args.lgbm.items())
+           + (f"_nw{args.near_weight:g}" if args.near_weight != NEAR_WEIGHT else "")
+           + ("" if default_guard else f"_g{args.guard_setup:g}-{args.guard_hold:g}")
            + ("_sweep" if len(args.alpha_setup) > 1 or len(args.alpha_hold) > 1 or args.margins else "")
            + ("_linear" if args.model == "linear" else ""))
     out = WORK / "prune" / f"{tag}.csv"
